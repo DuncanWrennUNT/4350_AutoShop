@@ -226,3 +226,236 @@ def place_order():
                 flash("Stock depletion error encouterd during transaction table phase.")
                 conn.close()
                 return redirect(url_for('browse_catalog'))
+@app.route('/customer/history')
+def customer_history():
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    conn = get_db_connection()
+    orders = conn.execute("""
+        SELECT o.order_id, o.order_date, o.status, o.total_amount, p.part_name, oi.quantity
+        FROM Order o
+        JOIN Order_Item oi ON o.order_id = oi.order_id
+        JOIN Part p ON oi.part_id = p.part_id
+        WHERE o.customer_id = ? ORDER BY o.order_date DESC
+    """, (session['customer_id'],)).fetchall()
+    conn.close()
+    template = """
+        {%extends "base" %}
+        {%block content %}
+        <h1>Customer Order History</h1>
+        {% for o in orders %}
+        {% endfor %}
+    Order ID
+        Date/Time Timestamp Details | Quantity Ordered | Total Invoice | Fulfillment Status
+        #{{ o.order_id }} | {{ o.order_date }} | {{ o.part_name }} | {{ o.quantity }} | ${{ "%.2f"|format(o['total_amount']) }} | {{ o.status }
+    {% endblock %}
+        """
+    return render_template_string(template, orders=orders, base=BASE_LAYOUT)
+
+#Store Operation Section
+@app.route('/store/login', methods=['GET', 'POST'])
+def store_login():
+    if request.method == 'POST':
+        username, password = request.form.get('username'), request.form.get('password')
+        conn = get_db_connection()
+        emp = conn.execute('SELECT * FROM Employee WHERE username = ? AND status="Active" ', (username,)).fetchone()
+        conn.close()
+        if emp and check_password_hash(emp['password_hash'], password):
+            session.clear()
+            session['mode'] = 'store'
+            session['store_id'] = emp['store_id']
+            session['username'] = f"{emp['first_name']} {emp['last_name']} ({emp['role']})"
+            flash("Store login successful.")
+            return redirect(url_for('manage_employees'))
+        else:
+            flash("Invalid store credentials.")
+
+    template = """
+        {% extends "base" %}
+        {% block content %}
+        <h1>Store Login</h1>
+        <form method="POST">
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required>
+            <label for="password">Password:</label>
+            <input type="password" id="password" name="password" required>
+            <button type="submit">Login</button>
+        </form>
+        {% endblock %}
+    """
+    return render_template_string(template, base=BASE_LAYOUT)
+
+
+@app.route('/store/employees', methods=['GET', 'POST'])
+def manage_employees():
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
+
+    conn = get_db_connection()
+    if request.method == 'POST':
+        if 'add' in request.form:
+            conn.execute("""
+                INSERT INTO Employee (store_id, first_name, last_name, department, role, username, password_hash, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'Active')
+                """, (
+                    session.get('store_id'),
+                    request.form['first_name'],
+                    request.form['last_name'],
+                    request.form.get('department'),
+                    request.form['role'],
+                    request.form['username'],
+                    generate_password_hash('welcome123')
+                ))
+            conn.commit()
+            flash("Employee added successfully.")
+        elif 'delete' in request.form:
+            conn.execute(
+                'UPDATE Employee SET status = "Terminated" WHERE employee_id = ?',
+                (request.form['employee_id'],)
+            )
+            conn.commit()
+            flash("Employee record marked as inactive.")
+
+    employees = conn.execute('SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id WHERE e.status = "Active"').fetchall()
+    conn.close()
+
+    template = """
+        {% extends "base" %}
+        {% block content %}
+        <h1>Manage Employees</h1>
+        <table>
+            <tr>
+                <th>ID</th>
+                <th>First Name</th>
+                <th>Last Name</th>
+                <th>Department</th>
+                <th>Role</th>
+                <th>Actions</th>
+            </tr>
+            {% for e in employees %}
+            <tr>
+                <td>{{ e.employee_id }}</td>
+                <td>{{ e.first_name }}</td>
+                <td>{{ e.last_name }}</td>
+                <td>{{ e.department }}</td>
+                <td>{{ e.role }}</td>
+                <td>
+                    <form method="POST">
+                        <input type="hidden" name="employee_id" value="{{ e.employee_id }}">
+                        <button type="submit" name="delete">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <h2>Add Employee</h2>
+        <form method="POST">
+            <label for="first_name">First Name:</label>
+            <input type="text" id="first_name" name="first_name" required>
+            <label for="last_name">Last Name:</label>
+            <input type="text" id="last_name" name="last_name" required>
+            <label for="department">Department:</label>
+            <input type="text" id="department" name="department">
+            <label for="role">Role:</label>
+            <input type="text" id="role" name="role" required>
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required>
+            <button type="submit" name="add">Add Employee</button>
+        </form>
+        {% endblock %}
+    """
+    return render_template_string(template, employees=employees, base=BASE_LAYOUT)
+
+@app.route('/store/orders')
+def order_management():
+    if session.get{'mode'} != 'store': return redirect(url_for('store_login'))
+    conn = get_db_connection()
+    orders = conn.execute("""
+        SELECT o.order_id, o.order_date, o.total_amount, o.status, c.first_name || ' ' || c.last_name as customer_name, s.store_name
+        FROM Orders o
+        JOIN Customer c on o.customer_id = c.customer_id
+        JOIN Store s on o.store_id = s.store_id
+    """).fetchall()
+    conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h1> Queue & Delivery Pipeline Log
+    <table>
+            <tr>
+                <th>Customer ID</th>
+                <th>Branch</th>
+                <th>Node</th>
+                <th>Date Logged</th>
+                <th>Net Invoiced</th>
+                <th>Fulfillment Status</th>
+            </tr>
+            {% for o in orders %}
+            <tr>
+                <td>{{ o['customer_name'] }}</td>
+                <td>{{ o['store_name'] }}</td>
+                <td>{{ o['order_id'] }}</td>
+                <td>{{ o['order_date'] }}</td>
+                <td>${{ "%.2f"|format(o['total_amount']) }}</td>
+                <td>${{ o['status'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% endblock %}
+    """
+    return render_template_string(template, orders=orders, base=BASE_LAYOUT)
+    @app.route('/store/reports')
+    def store_reports():
+        if session.get('mode') != 'store': return redirect(url_for('store_login'))
+        conn = get_db_connection()
+        low_stock = conn.execute("SELECT * FROM low_stock").fetchall()
+        store_metrics = conn.execute("""
+            SELECT s.store_name, count(o.order_id) as total_orders, IFNULL(SUM(o.total_amount), 0.0) as gross_revenue
+            FROM Store s
+            LEFT JOIN Orders o on s.store_id = o.store_id
+            GROUP BY s.store_name
+        """).fetchall()
+        conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h1>Store Reports</h1>
+    <h2>Low Stock Items</h2>
+    <table>
+        <tr>
+            <th>Item ID</th>
+            <th>Item Name</th>
+            <th>Quantity</th>
+        </tr>
+        {% for item in low_stock %}
+        <tr>
+            <td>{{ item['item_id'] }}</td>
+            <td>{{ item['item_name'] }}</td>
+            <td>{{ item['quantity'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <h2>Store Metrics</h2>
+    <table>
+        <tr>
+            <th>Store Name</th>
+            <th>Total Orders</th>
+            <th>Gross Revenue</th>
+        </tr>
+        {% for metric in store_metrics %}
+        <tr>
+            <td>{{ metric['store_name'] }}</td>
+            <td>{{ metric['total_orders'] }}</td>
+            <td>${{ "%.2f"|format(metric['gross_revenue']) }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endblock %}
+    """
+    return render_template_string(template, low_stock=low_stock, store_metrics=store_metrics, base=BASE_LAYOUT)
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('browse_catalog'))
+    if __name__ == '__main__':
+        app.run(debug=True, port=5000)
