@@ -169,7 +169,7 @@ def browse_catalog():
 #CUSTOMER PORTAL
 @app.route('/customer/login', method=['GET', 'POST'])
 def customer_login():
-    if request.method = 'POST':
+    if request.method == 'POST':
         username, password = request.form['username'], request.form['password']
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM Customer WHERE username = ?', (username,)).fetchone()
@@ -202,28 +202,27 @@ def customer_login():
 @app.route('/customer/order', methods=['POST'])
 def place_order():
      if session.get('mode') != 'customer':
-          return redirect(url_for('customer_login'))
-          part_id = int(request.form['part_id'])
-          store_id = int(request.form['store_id'])
-          qty = int(request.form['qty'])
-          conn = get_db_connection()
-          part = conn.execute('SELECT * FROM Part WHERE part_id = ?', (part_id,)).fetchone()
-          inv = conn.execute('SELECT quantity FROM Inventory WHERE store_id = ? AND part_id = ?', (store_id, part_id)).fetchone()
-          if inv and inv['quantity'] >= qty:
-              total = part['unit_price'] * qty
-              #Need to make a metrics chain, using database
-              cursor = conn.cursor()
-              cursor.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
-                (session['customer_id'], store_id, total))
-              order_id = cursor.lastrowid
-              cursor.execute("INSERT INTO Order_Item (order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, 'Paid')",
-                (order_id, part_id, qty, part['unit_price']))
-              cursor.execute("INSERT INTO Payment (order_id, method, card_type, card_last4, amount, status) VALUES (?, "Credit Card', 'Visa', '4321', ?, 'Approved')", #EXAMPLE INPUT FOR CARD, NEED TO REPLACE
-              (order_id, total))
-              conn.commit()
-              flash(f"Order#{order_id} generated successfully! ${total: .2f} processed via Credit Card verification."}
-              else:
-                  flash{"Stock depletion error encouterd during transaction table phase.")
-                  conn.close()
-                  return redirect(url_for('browse_catalog'))
-             
+            return redirect(url_for('customer_login'))
+            part_id = int(request.form['part_id'])
+            store_id = int(request.form['store_id'])
+            qty = int(request.form['qty'])
+            conn = get_db_connection()
+            part = conn.execute('SELECT * FROM Part WHERE part_id = ?', (part_id,)).fetchone()
+            inv = conn.execute('SELECT quantity FROM Inventory WHERE store_id = ? AND part_id = ?', (store_id, part_id)).fetchone()
+            if inv and inv['quantity'] >= qty:
+                total = part['unit_price'] * qty
+                #Need to make a metrics chain, using database
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
+                    (session['customer_id'], store_id, total))
+                order_id = cursor.lastrowid
+                cursor.execute("INSERT INTO Order_Item (order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, 'Paid')",
+                    (order_id, part_id, qty, part['unit_price']))
+                cursor.execute("INSERT INTO Payment (order_id, method, card_type, card_last4, amount, status) VALUES (?, 'Credit Card', 'Visa', '4321', ?, 'Approved')", #EXAMPLE INPUT FOR CARD, NEED TO REPLACE
+                    (order_id, total))
+                conn.commit()
+                flash(f"Order#{order_id} generated successfully! ${total: .2f} processed via Credit Card verification.")
+            else:
+                flash("Stock depletion error encouterd during transaction table phase.")
+                conn.close()
+                return redirect(url_for('browse_catalog'))
