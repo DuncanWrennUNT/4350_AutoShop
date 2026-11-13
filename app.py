@@ -502,50 +502,108 @@ def order_management():
     def store_reports():
         if session.get('mode') != 'store': return redirect(url_for('store_login'))
         conn = get_db_connection()
-        low_stock = conn.execute("SELECT * FROM low_stock").fetchall()
-        store_metrics = conn.execute("""
-            SELECT s.store_name, count(o.order_id) as total_orders, IFNULL(SUM(o.total_amount), 0.0) as gross_revenue
-            FROM Store s
-            LEFT JOIN Orders o on s.store_id = o.store_id
-            GROUP BY s.store_name
-        """).fetchall()
+        low_stock = conn.execute("SELECT * FROM v_low_stock").fetchall()
+        daily = conn.execute("SELECT * FROM v_daily_sales").fetchall()
+        weekly = conn.execute("SELECT * FROM v_weekly_sales").fetchall()
+        monthly = conn.execute("SELECT * FROM v_monthly_sales").fetchall()
+        emp_status = conn.execute("SELECT * FROM v_employee_status").fetchall()
         conn.close()
-    template = """
-    {% extends "base" %}
-    {% block content %}
-    <h1>Store Reports</h1>
-    <h2>Low Stock Items</h2>
-    <table>
-        <tr>
-            <th>Item ID</th>
-            <th>Item Name</th>
-            <th>Quantity</th>
-        </tr>
-        {% for item in low_stock %}
-        <tr>
-            <td>{{ item['item_id'] }}</td>
-            <td>{{ item['item_name'] }}</td>
-            <td>{{ item['quantity'] }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    <h2>Store Metrics</h2>
-    <table>
-        <tr>
-            <th>Store Name</th>
-            <th>Total Orders</th>
-            <th>Gross Revenue</th>
-        </tr>
-        {% for metric in store_metrics %}
-        <tr>
-            <td>{{ metric['store_name'] }}</td>
-            <td>{{ metric['total_orders'] }}</td>
-            <td>${{ "%.2f"|format(metric['gross_revenue']) }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% endblock %}
-    """
+        template = """
+        {% extends "base" %}
+        {% block content %}
+        <h3>1. Low Stock Reorder Alert</h2>
+        <table>
+            <tr>
+                <th>Store</th>
+                <th>Part Name</th>
+                <th>Part #</th>
+                <th>Quantity</th>
+                <th>Reorder Level</th>
+            </tr>
+            {% for item in low_stock %}
+            <tr>
+                <td>{{ item['store_name'] }}</td>
+                <td>{{ item['part_number'] }}</td>
+                <td>{{ item['part_name'] }}</td>
+                <td>{{ item['quantity'] }}</td>
+                <td>{{ item['reorder_level'] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <h3>2.Daily Sales (v_daily_sales)</h3>
+        <table>
+            <tr>
+                <th>Store</th>
+                <th>Date</th>
+                <th>Orders</th>
+                <th>Revenue</th>
+            </tr>
+            {% for r in monthly %}
+            <tr>
+                <td>{{ r['store_name'] }}</td>
+                <td>{{ r['period'] }}</td>
+                <td>{{ r['order_count'] }}</td>
+                <td>{{ "%.2f"|format(r['revenue']) }}</td>
+            </tr>
+            {% endfor %}
+        <h3>3. Weekly Sales (v_weekly_sales)</h3>
+        <table>
+            <tr>
+                <th>Store</th>
+                <th>Week</th>
+                <th>Orders</th>
+                <th>Revenue</th>
+            </tr>
+            {% for r in monthly %}
+            <tr>
+                <td>{{ r['store_name'] }}</td>
+                <td>{{ r['period'] }}</td>
+                <td>{{ r['order_count'] }}</td>
+                <td>{{ "%.2f"|format(r['revenue']) }}</td>
+            </tr>
+            {% endfor %}
+        <h3>4. Monthly Sales (v_monthly_sales)</h3>
+        <table>
+            <tr>
+                <th>Store</th>
+                <th>Month</th>
+                <th>Orders</th>
+                <th>Revenue</th>
+            </tr>
+            {% for r in monthly %}
+            <tr>
+                <td>{{ r['store_name'] }}</td>
+                <td>{{ r['period'] }}</td>
+                <td>{{ r['order_count'] }}</td>
+                <td>{{ "%.2f"|format(r['revenue']) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <h3>5. Employee Status Report (v_employee_status)</h3>
+        <table>
+            <tr>
+                <th>ID</th>
+                <th>Employee</th>
+                <th>Store</th>
+                <th>Department</th>
+                <th>Role</th>
+                <th>Manager</th>
+                <th>Status</th>
+            </tr>
+            {% for e in emp_status %}
+            <tr>
+                <td>#{{ e['employee_id'] }}</td>
+                <td>{{ e['employee_name'] }}</td>
+                <td>{{ e['store_name'] }}</td>
+                <td>{{ e['department'] }}</td>
+                <td>{{ e['role'] }}</td>
+                <td>{{ e['manager_name'] }}</td>
+                <td>{{ e['status'] }}</td>
+            </tr>
+            {% endfor %}
+            </table>
+        {% endblock %}
+        """
     return render_template_string(template, low_stock=low_stock, store_metrics=store_metrics, base=BASE_LAYOUT)
 @app.route('/logout')
 def logout():
