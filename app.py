@@ -1,4 +1,5 @@
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from jinja2 import dictloader
 import sqlite3
 import uuid
 from datetime import date
@@ -120,6 +121,8 @@ LAYOUT = """
 </html>
 """
 
+app.jinja_loader = dictloader.DictLoader({'base': LAYOUT})
+
 #Start Route
 @app.route('/')
 def browse_catalog():
@@ -203,8 +206,7 @@ def browse_catalog():
         </table>
         {% endblock %}
         """
-    return render_template_string(template, parts=parts, base=BASE_LAYOUT)
-    store_filter = store_filter, base=BASE_LAYOUT)
+    return render_template_string(template, parts=parts,stores=stores, search=search, store_filter=store_filter)
 
 @app.route('/part/<int:part_id>')
 def part_detail(part_id):
@@ -258,9 +260,74 @@ def part_detail(part_id):
         </table>
         {% endblock %}
         """
-        return render_template_string(template, part=part, stock=stock, base=BASE_LAYOUT)
-        
-#CUSTOMER PORTAL
+    return render_template_string(template, part=part)
+
+@app.route('/customer/register', methods=['GET', 'POST'])
+def customer_register():
+    conn = get_db_connection()
+    stores = conn.execute("SELECT * FROM Store").fetchall()
+    if request.method == 'POST':
+        try:
+            conn.execute("""INSERT INTO Customer (preferred_store_id, first_name, last_name, email, phone, street, city, state, zip, username, password_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                request.form['preferred_store_id'],
+                request.form['first_name'],
+                request.form['last_name'],
+                request.form['email'],
+                request.form['phone'],
+                request.form['street'],
+                request.form['city'],
+                request.form['state'],
+                request.form['zip'],
+                request.form['username'],
+                generate_password_hash(request.form['password'])
+            ))
+            cust_id = conn.lastrowid
+            if request.form.get('make') and request.form.get('model'):
+                conn.execute("INSERT INTO Customer_Vehicle (customer_id, make, model, year) VALUES (?, ?, ?, ?)", 
+                             (cust_id, request.form['make'], request.form['model'], request.form['year']))
+            conn.commit()
+            flash("Customer account created successfully. Please log in.")
+            return redirect(url_for('customer_login'))
+        except sqlite3.IntegrityError:
+            flash("Username or email already exists. Please choose a different username or email.")
+        conn.close()
+        template = """
+        {% extends "base" %}
+        {% block content %}
+        <h2>Customer Account Registration</h2>
+        <form method="POST">
+            <div class="grid-2">
+                <div class="card">
+                    <h3>Personal Information</h3>
+                    <div class="form-row"><label>First Name</label><input type="text" name="first_name" required></div>
+                    <div class="form-row"><label>Last Name</label><input type="text" name="last_name" required></div>
+                    <div class="form-row"><label>Email</label><input type="email" name="email" required></div>
+                    <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
+                    <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
+                    <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+                </div>
+                <div class="card">
+                    <h3>Address, Store & Vehicle</h3>
+                    <div class="form-row"><label>Street Address</label><input type="text" name="address" required></div>
+                    <div class="form-row"><label>City</label><input type="text" name="city" required></div>
+                    <div class="form-row"><label>State</label><input type="text" name="state" required></div>
+                    <div class="form-row"><label>ZIP Code</label><input type="text" name="zip" required></div>
+                    <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %}</select></div>
+                    <h4>Vehicle Information (Optional)</h4>
+                    <div class="form-row"><label>Make</label><input type="text" name="make"></div>
+                    <div class="form-row"><label>Model</label><input type="text" name="model"></div>
+                    <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year }}"></div>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-success">Create Account</button>
+        </form>
+        {% endblock %}
+        """
+        return render_template_string(template, stores=stores, current_year=date.today().year)
+
+
 @app.route('/customer/login', method=['GET', 'POST'])
 def customer_login():
     if request.method == 'POST':
@@ -273,6 +340,7 @@ def customer_login():
              session['mode'] = 'customer'
              session['customer_id'] = user['customer_id']
              session['username'] = f"{user['first_name']} {user['last_name']}"
+             session['cart'] = []
              flash(f"Customer session initialized for user {username}")
              return redirect(url_for('browse_catalog'))
         flash("Invalid secure validation credentials.")
@@ -283,43 +351,231 @@ def customer_login():
     <div style="max-width:400px; margin:auto; padding:20px; border:1px solid #ccc; border_radius: 6px;">
         <h3>Customer Portal Auth</h3>
         <form method="POST">
-            <p><label>Username:</label><input type="text" name="username" style="width:100%; padding: 8px;" required></p>
-            <p><label>Password:</label><input type="password" name="password" style="width:100%; padding:8px;" required></p>
-            <button type="submit" class="btn" style="width:100%;">Authorize Session</button>
+            <div class="grid-2">
+                <div class="card">
+                    <h3>Personal & Account Info</h3>
+                    <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
+                    <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+                    <div class="form-row"><label>First Name</label><input type="text" name="first_name"></div>
+                    <div class="form-row"><label>Last Name</label><input type="text" name="last_name"></div>
+                    <div class="form-row"><label>Email</label><input type="text" name="email"></div>
+                    <div class="form-row"><label>Phone Number</label><input type="text" name="phone"></div>
+                </div>
+                <div class="card">
+                    <h3>Address & Vehicle Info</h3>
+                    <div class="form-row"><label>Street Address</label><input type="text" name="street"></div>
+                    <div class="form-row"><label>City</label><input type="text" name="city"></div>
+                    <div class="form-row"><label>State</label><input type="text" name="state"></div>
+                    <div class="form-row"><label>ZIP Code</label><input type="text" name="zip"></div>
+                    <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id" required> {% for s in stores %} <option value="{{ s.store_id }}">{{ s.store_name }}</option> {% endfor %} </select></div>
+                    <h4>Vehicle Information (Optional)</h4>
+                    <div class="form-row"><label>Vehicle Make</label><input type="text" name="make"></div>
+                    <div class="form-row"><label>Vehicle Model</label><input type="text" name="model"></div>
+                    <div class="form-row"><label>Vehicle Year</label><input type="number" name="year" min="1900" max="{{ current_year }}"></div>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-success">Register Account</button>
         </form>
-        <p style="font-size:12px; color:gray; text-alight:center; margin-top:15px;">Demo profile: johndoe/password123</p>
     </div>
     {% endblock %}
     """
-    return render_template_string(template, base=BASE_LAYOUT)
+    return render_template_string(template)
 
-@app.route('/customer/order', methods=['POST'])
-def place_order():
-     if session.get('mode') != 'customer':
-            return redirect(url_for('customer_login'))
-            part_id = int(request.form['part_id'])
-            store_id = int(request.form['store_id'])
-            qty = int(request.form['qty'])
-            conn = get_db_connection()
-            part = conn.execute('SELECT * FROM Part WHERE part_id = ?', (part_id,)).fetchone()
-            inv = conn.execute('SELECT quantity FROM Inventory WHERE store_id = ? AND part_id = ?', (store_id, part_id)).fetchone()
-            if inv and inv['quantity'] >= qty:
-                total = part['unit_price'] * qty
-                #Need to make a metrics chain, using database
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)",
-                    (session['customer_id'], store_id, total))
-                order_id = cursor.lastrowid
-                cursor.execute("INSERT INTO Order_Item (order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, 'Paid')",
-                    (order_id, part_id, qty, part['unit_price']))
-                cursor.execute("INSERT INTO Payment (order_id, method, card_type, card_last4, amount, status) VALUES (?, 'Credit Card', 'Visa', '4321', ?, 'Approved')", #EXAMPLE INPUT FOR CARD, NEED TO REPLACE
-                    (order_id, total))
-                conn.commit()
-                flash(f"Order#{order_id} generated successfully! ${total: .2f} processed via Credit Card verification.")
-            else:
-                flash("Stock depletion error encouterd during transaction table phase.")
-                conn.close()
-                return redirect(url_for('browse_catalog'))
+@app.route('/customer/profile')
+def customer_profile():
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    conn = get_db_connection()
+    if request.method == 'POST':
+        if 'update_profile' in request.form:
+            conn.execute("""
+                UPDATE Customer SET first_name = ?, last_name = ?, email = ?, phone = ?, street = ?, city = ?, state = ?, zip = ?, preferred_store_id = ?
+                WHERE customer_id = ?
+            """, (
+                request.form['first_name'],
+                request.form['last_name'],
+                request.form['email'],
+                request.form['phone'],
+                request.form['street'],
+                request.form['city'],
+                request.form['state'],
+                request.form['zip'],
+                request.form['preferred_store_id'],
+                session['customer_id']
+            ))
+            conn.commit()
+            flash("Profile updated successfully.")
+        elif 'add_vehicle' in request.form:
+            conn.execute("""
+                INSERT INTO Customer_Vehicle (customer_id, make, model, year)
+                VALUES (?, ?, ?, ?)
+            """, (
+                session['customer_id'],
+                request.form['make'],
+                request.form['model'],
+                request.form['year']
+            ))
+            conn.commit()
+            flash("Vehicle added successfully.")
+    customer = conn.execute("SELECT * FROM Customer WHERE customer_id = ?", (session['customer_id'],)).fetchone()
+    vehicles = conn.execute("SELECT * FROM Customer_Vehicle WHERE customer_id = ?", (session['customer_id'],)).fetchall()
+    stores = conn.execute("SELECT * FROM Store").fetchall()
+    conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h2>Customer Profile</h2>
+    <div class="grid-2">
+        <div class="card">
+            <h3>Contact & Billing Information</h3>
+            <p>Name: {{ customer['first_name'] }} {{ customer['last_name'] }} ({{ customer['email'] }})</p>
+            <form method="POST">
+                <div class="form-row"><label>Phone</label><input type="text" name="phone" value="{{ customer['phone'] }}"></div>
+                <div class="form-row"><label>Street</label><input type="text" name="street" value="{{ customer['street'] }}"></div>
+                <div class="form-row"><label>City</label><input type="text" name="city" value="{{ customer['city'] }}"></div>
+                <div class="form-row"><label>State</label><input type="text" name="state" value="{{ customer['state'] }}"></div>
+                <div class="form-row"><label>ZIP</label><input type="text" name="zip" value="{{ customer['zip'] }}"></div>
+                <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id">{% for s in stores %}<option value="{{ s['store_id'] }}" {% if customer['preferred_store_id'] == s['store_id'] %}selected{% endif %}>{{ s['store_name'] }}</option>{% endfor %}</select></div>
+                <button type="submit" name="update_profile" class="btn btn-success">Update Profile</button>
+            </form>
+        </div>
+        <div class="card">
+            <h3>My Vehicles</h3>
+            {% if vehicles %}
+                <ul>
+                    {% for v in vehicles %}
+                        <li>{{ v['year'] }} {{ v['make'] }} {{ v['model'] }}</li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>No vehicles registered.</p>
+            {% endif %}
+            <h4>Add a New Vehicle</h4>
+            <form method="POST">
+                <div class="form-row"><label>Make</label><input type="text" name="make" required></div>
+                <div class="form-row"><label>Model</label><input type="text" name="model" required></div>
+                <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year }}" required></div>
+                <button type="submit" name="add_vehicle" class="btn btn-success">Add Vehicle</button>
+            </form>
+        </div>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(template, customer=customer, vehicles=vehicles, stores=stores, current_year=date.today().year)
+
+@app.route('/customer/cart/add', methods=['POST'])
+def add_to_cart():
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    part_id, store_id, qty, cart = request.form['part_id'], request.form['store_id'], int(request.form['qty']), session.get('cart', [])
+    if cart and cart[0]['store_id'] != store_id:
+        flash("You can only add items from one store at a time. Please clear your cart to add items from a different store.")
+        return redirect(url_for('view_cart'))
+    for item in cart:
+        if item['part_id'] == part_id and item['store_id'] == store_id:
+            item['qty'] += qty
+            break
+    else:
+        cart.append({'part_id': part_id, 'store_id': store_id, 'qty': qty})
+    session['cart'] = cart
+    flash(f"Added {qty} item(s) to your shopping cart.")
+    return redirect(url_for('browse_catalog'))
+
+@app.route('/customer/cart', methods=['GET', 'POST'])
+def view_cart():
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    conn = get_db_connection()
+    cart = session.get('cart', [])
+    cart_details = []
+    total_amount = 0.0
+    for item in cart:
+        part = conn.execute("""
+            SELECT p.part_id, p.part_number, p.part_name, p.unit_price, s.store_name, i.quantity AS stock
+            FROM Part p
+            JOIN Inventory i ON p.part_id = i.part_id
+            JOIN Store s ON i.store_id = s.store_id
+            WHERE p.part_id = ? AND s.store_id = ?
+        """, (item['part_id'], item['store_id'])).fetchone()
+        if part:
+            item_total = part['unit_price'] * item['qty']
+            total_amount += item_total
+            cart_details.append({
+                'part_id': part['part_id'],
+                'part_number': part['part_number'],
+                'part_name': part['part_name'],
+                'unit_price': part['unit_price'],
+                'store_name': part['store_name'],
+                'quantity': item['qty'],
+                'item_total': item_total,
+                'available_quantity': part['quantity']
+            })
+    customer = conn.execute("SELECT * FROM Customer WHERE customer_id = ?", (session['customer_id'],)).fetchone()
+    conn.close()
+    template = """
+        {% extends "base" %}
+        {% block content %}
+        <h2>Shopping Cart</h2>
+        {% if not cart_details %}
+        <p>Your shopping cart is empty.</p>
+        {% else %}
+        <table>
+            <tr><th>Part Name</th><th>Store</th><th>Unit Price</th><th>Quantity</th><th>Total</th></tr>
+            {% for item in cart_details %}
+            <tr>
+                <td>{{ item['part_name'] }}</td>
+                <td>{{ item['store_name'] }}</td>
+                <td>${{ "%.2f"|format(item['unit_price']) }}</td>
+                <td>{{ item['quantity'] }} (Available: {{ item['available_quantity'] }})</td>
+                <td>${{ "%.2f"|format(item['item_total']) }}</td>
+            </tr>
+            {% endfor %}
+            <tr><td colspan="4" style="text-align:right;"><strong>Total Amount:</strong></td><td>${{ "%.2f"|format(total_amount) }}</td></tr>
+        </table>
+        <form method="POST" action="{{ url_for('checkout') }}">
+            <button type="submit" class="btn btn-primary">Proceed to Checkout</button>
+        </form>
+    {% endif %}
+{% endblock %}
+    """
+    return render_template_string(template, cart_details=cart_details, total_amount=total_amount, customer=customer)
+
+@app.route('/customer/checkout', methods=['POST'])
+def checkout():
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    cart = session.get('cart', [])
+    if not cart:
+        flash("Your shopping cart is empty.")
+        return redirect(url_for('view_cart'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    store_id = cart[0]['store_id']
+    total_amount = 0.0
+    verified_items = []
+    for item in cart:
+        part = cur.execute("SELECT p.unit_price, p.part_name FROM Part WHERE part_id = ?", (item['part_id'],)).fetchone()
+        inv = cur.execute("SELECT quantity FROM Inventory WHERE part_id = ? AND store_id = ?", (item['part_id'], item['store_id'])).fetchone()
+        if not part or inv['quantity'] < item['qty']:
+            flash(f"Insufficient stock for part ID {item['part_id']} at store ID {item['store_id']}.")
+            total_amount += part['unit_price'] * item['qty']
+            verified_items.append((item['part_id'], item['quantity'], part['unit_price']))
+        cur.execute("INSERT INTO ORDERS(customer_id, store_id, status, total_amount) VALUES (?, ?, 'Paid', ?)", (session['customer_id'], store_id, total_amount))
+        order_id = cur.lastrowid
+        for pid, qty, price in verified_items:
+            cur.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)", (order_id, pid, qty, price))
+            cur.execute("UPDATE Inventory SET quantity = quantity - ? WHERE part_id = ? AND store_id = ?", (qty, pid, store_id))
+            card_num = request.form['card_number'].strip()
+            last4 = card_num[-4:] if len(card_num) >= 4 else '0000'
+            cur.execute("""INSERT INTO Payment(order_id, payment_method, card_type, card_last4, billing_address, amount, status) VALUES (?, 'Credit Card', ?, ?, ?, ?)", (order_id, request.form['method'], request.form['card_type'], last4, request.form['billing_address'], total_amount, 'Approved')""")
+            tracking = f"TRK-{uuid.uuid4().hex[:8].upper()}"
+            cur.execute("INSERT INTO Delivery(order_id, tracking_number, status) VALUES (?, ?, 'Processing')", (order_id, tracking))
+            conn.commit()
+            conn.close()
+            session['cart'] = []
+            flash(f"Order placed successfully! Your order ID is {order_id}. Tracking number: {tracking}")
+            return redirect(url_for('customer_history'))
+
 @app.route('/customer/history')
 def customer_history():
     if session.get('mode') != 'customer':
@@ -344,7 +600,7 @@ def customer_history():
         #{{ o.order_id }} | {{ o.order_date }} | {{ o.part_name }} | {{ o.quantity }} | ${{ "%.2f"|format(o['total_amount']) }} | {{ o.status }
     {% endblock %}
         """
-    return render_template_string(template, orders=orders, base=BASE_LAYOUT)
+    return render_template_string(template, orders=orders)
 
 #Store Operation Section
 @app.route('/store/login', methods=['GET', 'POST'])
@@ -377,38 +633,359 @@ def store_login():
         </form>
         {% endblock %}
     """
-    return render_template_string(template, base=BASE_LAYOUT)
+    return render_template_string(template)
     
 @app.route('/store/orders', methods=['GET', 'POST'])
 def store_orders():
-    
+    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    conn = get_db_connection()
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'update_delivery':
+            order_id = request.form['order_id']
+            new_status = request.form['delivery_status']
+            tracking = request.form['tracking_number']
+            ship_dt = date.today().isoformat() if new_status in ('Shipped', 'Delivered') else None
+            deliv_dt = date.today().isoformat() if new_status == 'Delivered' else None
+            conn.execute("""
+                UPDATE Delivery SET status=?, tracking_number=?, employee_id=?,
+                ship_date=COALESCE(ship_date, ?), delivery_date=COALESCE(?, delivery_date)
+                WHERE order_id=?
+            """, (new_status, tracking, session['employee_id'], ship_dt, deliv_dt, order_id))
+            if new_status == 'Cancelled':
+                conn.execute("UPDATE Orders SET status='Cancelled' WHERE order_id=?", (order_id,))
+            elif new_status in ('Shipped', 'Delivered'):
+                conn.execute("UPDATE Orders SET status=? WHERE order_id=?", (new_status, order_id))
+            conn.commit()
+            flash(f"Delivery & order status updated for Order #{order_id}.")
+        elif action == 'process_return':
+            order_id = int(request.form['order_id'])
+            part_id = int(request.form['part_id'])
+            qty = int(request.form['quantity'])
+            reason = request.form['reason']
+            oi = conn.execute("SELECT unit_price, quantity FROM Order_Item WHERE order_id=? AND part_id=?", (order_id, part_id)).fetchone()
+            ord_row = conn.execute("SELECT store_id FROM Orders WHERE order_id=?", (order_id,)).fetchone()
+            if oi and qty <= oi['quantity']:
+                refund = oi['unit_price'] * qty
+                conn.execute("""
+                    INSERT INTO Return_Item (order_id, part_id, employee_id, quantity, reason, refund_amount)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (order_id, part_id, session['employee_id'], qty, reason, refund))
+                conn.execute("UPDATE Inventory SET quantity = quantity + ? WHERE store_id=? AND part_id=?",
+                             (qty, ord_row['store_id'], part_id))
+                conn.execute("UPDATE Orders SET status='Returned' WHERE order_id=?", (order_id,))
+                conn.commit()
+                flash(f"Return processed (${refund:.2f} refunded) and inventory restocked.")
+            else:
+                flash("Invalid return quantity.")
+    orders = conn.execute("""
+        SELECT o.*, c.first_name || ' ' || c.last_name AS customer_name, s.store_name,
+               d.tracking_number, d.ship_date, d.delivery_date, d.status AS delivery_status, pay.method AS payment_method
+        FROM Orders o
+        JOIN Customer c ON o.customer_id = c.customer_id
+        JOIN Store s ON o.store_id = s.store_id
+        LEFT JOIN Delivery d ON o.order_id = d.order_id
+        LEFT JOIN Payment pay ON o.order_id = pay.order_id
+        ORDER BY o.order_id DESC
+    """).fetchall()
+    order_items = conn.execute("""
+        SELECT oi.order_id, oi.part_id, oi.quantity, p.part_number, p.part_name
+        FROM Order_Item oi JOIN Part p ON oi.part_id = p.part_id
+    """).fetchall()
+    conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h2>Customer Order, Delivery & Return Management</h2>
+    <table>
+        <tr><th>Order #</th><th>Customer</th><th>Branch</th><th>Order Date</th><th>Payment</th><th>Total</th><th>Delivery & Tracking</th><th>Update Status</th></tr>
+        {% for o in orders %}
+        <tr>
+            <td>#{{ o['order_id'] }}<br><span class="badge badge-warn">{{ o['status'] }}</span></td>
+            <td>{{ o['customer_name'] }}</td>
+            <td>{{ o['store_name'] }}</td>
+            <td>{{ o['order_date'] }}</td>
+            <td>{{ o['payment_method'] }}</td>
+            <td>${{ "%.2f"|format(o['total_amount']) }}</td>
+            <td>
+                Status: {{ o['delivery_status'] }}<br>
+                Ship: {{ o['ship_date'] or '-' }} | Deliv: {{ o['delivery_date'] or '-' }}
+            </td>
+            <td>
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_delivery">
+                    <input type="hidden" name="order_id" value="{{ o['order_id'] }}">
+                    <select name="delivery_status">
+                        {% for st in ['Pending', 'Shipped', 'Delivered', 'Cancelled'] %}
+                        <option value="{{ st }}" {% if o['delivery_status'] == st %}selected{% endif %}>{{ st }}</option>
+                        {% endfor %}
+                    </select>
+                    <input type="text" name="tracking_number" value="{{ o['tracking_number'] or '' }}" placeholder="Tracking #" style="width:120px;">
+                    <button type="submit" class="btn">Update</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+ 
+    <div class="card" style="margin-top:25px;">
+        <h3>Process Customer Return</h3>
+        <form method="POST">
+            <input type="hidden" name="action" value="process_return">
+            <div class="form-row"><label>Order ID</label>
+                <select name="order_id">
+                    {% for o in orders %}<option value="{{ o['order_id'] }}">Order #{{ o['order_id'] }} ({{ o['customer_name'] }})</option>{% endfor %}
+                </select>
+            </div>
+            <div class="form-row"><label>Part Returned</label>
+                <select name="part_id">
+                    {% for item in order_items %}<option value="{{ item['part_id'] }}">Order #{{ item['order_id'] }} - {{ item['part_number'] }} ({{ item['part_name'] }})</option>{% endfor %}
+                </select>
+            </div>
+            <div class="form-row"><label>Quantity Returned</label><input type="number" name="quantity" min="1" value="1" required></div>
+            <div class="form-row"><label>Reason</label><input type="text" name="reason" required></div>
+            <button type="submit" class="btn btn-danger">Log Return & Refund</button>
+        </form>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(template, orders=orders, order_items=order_items)
+
 @app.route('/store/purchase-orders', methods=['GET', 'POST'])
 def store_purchase_orders():
-    
-    
+    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    conn = get_db_connection()
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'create_po':
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO Purchase_Order (supplier_id, store_id, employee_id, expected_date, po_type, status)
+                VALUES (?, ?, ?, ?, ?, 'Ordered')
+            """, (request.form['supplier_id'], request.form['store_id'], session['employee_id'],
+                  request.form['expected_date'], request.form['po_type']))
+            po_id = cur.lastrowid
+            cur.execute("INSERT INTO Purchase_Order_Item (po_id, part_id, quantity, unit_cost) VALUES (?, ?, ?, ?)",
+                        (po_id, request.form['part_id'], request.form['quantity'], request.form['unit_cost']))
+            conn.commit()
+            flash(f"Purchase Order #{po_id} submitted to supplier.")
+        elif action == 'update_po':
+            po_id = int(request.form['po_id'])
+            new_status = request.form['status']
+            po = conn.execute("SELECT * FROM Purchase_Order WHERE po_id=?", (po_id,)).fetchone()
+            if po and po['status'] == 'Ordered' and new_status == 'Received':
+                items = conn.execute("SELECT * FROM Purchase_Order_Item WHERE po_id=?", (po_id,)).fetchall()
+                for it in items:
+                    conn.execute("""
+                        INSERT INTO Inventory (store_id, part_id, quantity, reorder_level)
+                        VALUES (?, ?, ?, 5)
+                        ON CONFLICT(store_id, part_id) DO UPDATE SET quantity = quantity + excluded.quantity
+                    """, (po['store_id'], it['part_id'], it['quantity']))
+            conn.execute("UPDATE Purchase_Order SET status=? WHERE po_id=?", (new_status, po_id))
+            conn.commit()
+            flash(f"Purchase Order #{po_id} marked as {new_status}.")
+    pos = conn.execute("""
+        SELECT po.*, sup.supplier_name, s.store_name, p.part_number, p.part_name, poi.quantity, poi.unit_cost
+        FROM Purchase_Order po
+        JOIN Supplier sup ON po.supplier_id = sup.supplier_id
+        JOIN Store s ON po.store_id = s.store_id
+        JOIN Purchase_Order_Item poi ON po.po_id = poi.po_id
+        JOIN Part p ON poi.part_id = p.part_id
+        ORDER BY po.po_id DESC
+    """).fetchall()
+    suppliers = conn.execute("SELECT * FROM Supplier").fetchall()
+    stores = conn.execute("SELECT * FROM Store").fetchall()
+    parts = conn.execute("SELECT * FROM Part").fetchall()
+    conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h2>Supplier Purchase Orders (Order New / Reorder / Stop Orders)</h2>
+    <div class="card">
+        <h3>Create Supplier Purchase Order</h3>
+        <form method="POST">
+            <input type="hidden" name="action" value="create_po">
+            <div class="form-row"><label>Order Type</label>
+                <select name="po_type"><option value="Reorder">Reorder</option><option value="New Part Order">New Part Order</option></select>
+            </div>
+            <div class="form-row"><label>Destination Store</label>
+                <select name="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %}</select>
+            </div>
+            <div class="form-row"><label>Supplier</label>
+                <select name="supplier_id">{% for sup in suppliers %}<option value="{{ sup['supplier_id'] }}">{{ sup['supplier_name'] }}</option>{% endfor %}</select>
+            </div>
+            <div class="form-row"><label>Part</label>
+                <select name="part_id">{% for p in parts %}<option value="{{ p['part_id'] }}">{{ p['part_number'] }} - {{ p['part_name'] }}</option>{% endfor %}</select>
+            </div>
+            <div class="form-row"><label>Quantity</label><input type="number" name="quantity" min="1" value="1" required></div>
+            <div class="form-row"><label>Unit Cost ($)</label><input type="number" name="unit_cost" step="0.01" min="0" required></div>
+            <div class="form-row"><label>Expected Delivery Date</label><input type="date" name="expected_date" required></div>
+            <button type="submit" class="btn btn-success">Submit Purchase Order</button>
+        </form>
+    </div>
+    <table>
+        <tr><th>PO #</th><th>Type</th><th>Store</th><th>Supplier</th><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Expected</th><th>Status</th><th>Action</th></tr>
+        {% for po in pos %}
+        <tr>
+            <td>#{{ po['po_id'] }}</td>
+            <td>{{ po['po_type'] }}</td>
+            <td>{{ po['store_name'] }}</td>
+            <td>{{ po['supplier_name'] }}</td>
+            <td>{{ po['part_number'] }} ({{ po['part_name'] }})</td>
+            <td>{{ po['quantity'] }}</td>
+            <td>${{ "%.2f"|format(po['unit_cost']) }}</td>
+            <td>{{ po['expected_date'] }}</td>
+            <td>{{ po['status'] }}</td>
+            <td>
+                {% if po['status'] == 'Ordered' %}
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="update_po">
+                    <input type="hidden" name="po_id" value="{{ po['po_id'] }}">
+                    <button type="submit" name="status" value="Received" class="btn btn-success">Mark Received</button>
+                    <button type="submit" name="status" value="Stopped" class="btn btn-danger">Stop Order</button>
+                </form>
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endblock %}
+    """
+    return render_template_string(template, pos=pos, suppliers=suppliers, stores=stores, parts=parts)
+ 
 @app.route('/store/database', methods=['GET', 'POST'])
 def store_db_management():
-    
-    
+    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    conn = get_db_connection()
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'add_part':
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO Part (part_number, part_name, category, description, part_condition, unit_price, supplier_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (request.form['part_number'], request.form['part_name'], request.form['category'],
+                      request.form['description'], request.form['part_condition'], request.form['unit_price'], request.form['supplier_id']))
+                new_part_id = cur.lastrowid
+                stores = cur.execute("SELECT store_id FROM Store").fetchall()
+                for s in stores:
+                    cur.execute("INSERT INTO Inventory (store_id, part_id, quantity, reorder_level) VALUES (?, ?, 0, 5)", (s['store_id'], new_part_id))
+                conn.commit()
+                flash("New auto part added to catalog.")
+            except sqlite3.IntegrityError:
+                flash("Part number already exists.")
+        elif action == 'update_part':
+            conn.execute("UPDATE Part SET part_name=?, unit_price=?, part_condition=? WHERE part_id=?",
+                         (request.form['part_name'], request.form['unit_price'], request.form['part_condition'], request.form['part_id']))
+            conn.commit()
+            flash("Part updated.")
+        elif action == 'add_store':
+            try:
+                conn.execute("INSERT INTO Store (store_name, street, city, state, zip, phone) VALUES (?,?,?,?,?,?)",
+                             (request.form['store_name'], request.form['street'], request.form['city'],
+                              request.form['state'], request.form['zip'], request.form['phone']))
+                conn.commit()
+                flash("New store location added.")
+            except sqlite3.IntegrityError:
+                flash("Store name already exists.")
+    parts = conn.execute("SELECT p.*, sup.supplier_name FROM Part p LEFT JOIN Supplier sup ON p.supplier_id = sup.supplier_id").fetchall()
+    stores = conn.execute("SELECT * FROM Store").fetchall()
+    suppliers = conn.execute("SELECT * FROM Supplier").fetchall()
+    conn.close()
+    template = """
+    {% extends "base" %}
+    {% block content %}
+    <h2>Database Management — Parts & Store Branches</h2>
+    <div class="grid-2">
+        <div class="card">
+            <h3>Add New Auto Part</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="add_part">
+                <div class="form-row"><label>Part Number</label><input type="text" name="part_number" required></div>
+                <div class="form-row"><label>Part Name</label><input type="text" name="part_name" required></div>
+                <div class="form-row"><label>Category</label><input type="text" name="category"></div>
+                <div class="form-row"><label>Description</label><input type="text" name="description"></div>
+                <div class="form-row"><label>Condition</label>
+                    <select name="part_condition"><option value="New">New</option><option value="Rebuilt">Rebuilt</option></select>
+                </div>
+                <div class="form-row"><label>Unit Price ($)</label><input type="number" name="unit_price" step="0.01" min="0" required></div>
+                <div class="form-row"><label>Primary Supplier</label>
+                    <select name="supplier_id">{% for sup in suppliers %}<option value="{{ sup['supplier_id'] }}">{{ sup['supplier_name'] }}</option>{% endfor %}</select>
+                </div>
+                <button type="submit" class="btn btn-success">Add Part</button>
+            </form>
+        </div>
+        <div class="card">
+            <h3>Add New Store Location</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="add_store">
+                <div class="form-row"><label>Store Name</label><input type="text" name="store_name" required></div>
+                <div class="form-row"><label>Street</label><input type="text" name="street"></div>
+                <div class="form-row"><label>City</label><input type="text" name="city"></div>
+                <div class="form-row"><label>State</label><input type="text" name="state" maxlength="2"></div>
+                <div class="form-row"><label>ZIP Code</label><input type="text" name="zip" maxlength="5"></div>
+                <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
+                <button type="submit" class="btn btn-success">Add Store Branch</button>
+            </form>
+        </div>
+    </div>
+ 
+    <h3>Active Branches</h3>
+    <ul>
+        {% for s in stores %}<li>{{ s['store_name'] }} — {{ s['city'] }}, {{ s['state'] }} ({{ s['phone'] }})</li>{% endfor %}
+    </ul>
+ 
+    <h3>Update Existing Auto Parts</h3>
+    <table>
+        <tr><th>Part #</th><th>Name</th><th>Condition</th><th>Unit Price</th><th>Supplier</th><th>Save</th></tr>
+        {% for p in parts %}
+        <tr>
+            <td>{{ p['part_number'] }}</td>
+            <td><input type="text" name="part_name" value="{{ p['part_name'] }}" form="upd{{ p['part_id'] }}"></td>
+            <td>
+                <select name="part_condition" form="upd{{ p['part_id'] }}">
+                    <option value="New" {% if p['part_condition'] == 'New' %}selected{% endif %}>New</option>
+                    <option value="Rebuilt" {% if p['part_condition'] == 'Rebuilt' %}selected{% endif %}>Rebuilt</option>
+                </select>
+            </td>
+            <td><input type="number" name="unit_price" step="0.01" min="0" value="{{ p['unit_price'] }}" form="upd{{ p['part_id'] }}" style="width:90px;"></td>
+            <td>{{ p['supplier_name'] or '-' }}</td>
+            <td>
+                <form id="upd{{ p['part_id'] }}" method="POST">
+                    <input type="hidden" name="action" value="update_part">
+                    <input type="hidden" name="part_id" value="{{ p['part_id'] }}">
+                    <button type="submit" class="btn">Save</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endblock %}
+    """
+    return render_template_string(template, parts=parts, stores=stores, suppliers=suppliers)
+
 @app.route('/store/employees', methods=['GET', 'POST'])
 def store_employees():
     if session.get('mode') != 'store':
         return redirect(url_for('store_login'))
-
+    is_manager = (session.get('role') =='Store Manager')
     conn = get_db_connection()
     if request.method == 'POST':
         if not is_manager:
             flash("Permisson Denied: Only Store Managers can modify employee records.")
             return redirect(url_for('store_employees'))
-        action = request.form.get('action)
+        action = request.form.get('action')
         if action == 'add':
-            try:
-                conn.execute("""
+            
+            conn.execute("""
                     INSERT INTO Employee (store_id, manager_id, first_name, last_name, department, role, phone, email, username, password_hash, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 """, (
-                    rqeuest.form['store_id'],
-                    rqeuest.form['employee_id'],
+                    request.form['store_id'],
+                    request.form['manager_id'],
                     request.form['first_name'],
                     request.form['last_name'],
                     request.form['department'],
@@ -510,11 +1087,11 @@ def store_employees():
         <table>
         {%endblock%}
         """
-    return render_template_string(template, employees=employees, base=BASE_LAYOUT)
+    return render_template_string(template, employees=employees)
 
 @app.route('/store/orders')
 def order_management():
-    if session.get{'mode'} != 'store': return redirect(url_for('store_login'))
+    if session.get('mode') != 'store': return redirect(url_for('store_login'))
     conn = get_db_connection()
     orders = conn.execute("""
         SELECT o.order_id, o.order_date, o.total_amount, o.status, c.first_name || ' ' || c.last_name as customer_name, s.store_name
@@ -549,7 +1126,7 @@ def order_management():
         </table>
     {% endblock %}
     """
-    return render_template_string(template, orders=orders, base=BASE_LAYOUT)
+    return render_template_string(template, orders=orders)
     @app.route('/store/reports')
     def store_reports():
         if session.get('mode') != 'store': return redirect(url_for('store_login'))
