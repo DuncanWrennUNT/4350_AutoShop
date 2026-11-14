@@ -644,14 +644,15 @@ def cancel_order(order_id):
 @app.route('/store/login', methods=['GET', 'POST'])
 def store_login():
     if request.method == 'POST':
-        username, password = request.form.get('username'), request.form.get('password')
         conn = get_db_connection()
-        emp = conn.execute('SELECT * FROM Employee WHERE username = ? AND status="Active" ', (username,)).fetchone()
+        emp = conn.execute('SELECT * FROM Employee WHERE username = ? AND status="Active" ', (request.form['username'],)).fetchone()
         conn.close()
-        if emp and check_password_hash(emp['password_hash'], password):
+        if emp and check_password_hash(emp['password_hash'], request.form['password']):
             session.clear()
             session['mode'] = 'store'
+            session['employee_id'] = emp['employee_id']
             session['store_id'] = emp['store_id']
+            session['role'] = emp['role']
             session['username'] = f"{emp['first_name']} {emp['last_name']} ({emp['role']})"
             flash("Store login successful.")
             return redirect(url_for('manage_employees'))
@@ -661,17 +662,21 @@ def store_login():
     template = """
         {% extends "base" %}
         {% block content %}
-        <h1>Store Login</h1>
-        <form method="POST">
-            <label for="username">Username:</label>
-            <input type="text" id="username" name="username" required>
-            <label for="password">Password:</label>
-            <input type="password" id="password" name="password" required>
-            <button type="submit">Login</button>
-        </form>
-        {% endblock %}
+        <div class="card" style="max-width:400px; margin:auto;">
+            <h3>Store Employee Login</h3>
+            <form method="POST">
+                <div class="form-row"><label>Employee Username</label><input type="text" name="username" required></div>
+                <div class="form-row"><label>Employee Password</label><input type="password" name="password" required></div>
+                <button type="submit">Login</button>
+            </form>
+        <p style="font-size:12px; color:#64748b;">
+            Manager Demo: Manager1 / adminpwd<br>
+            Staff Demo: Staff1 / staffpwd
+        </p>
+    </div>
+    {% endblock %}
     """
-    return render_template_string(template)
+    return render_template_string(template, base=BASE_LAYOUT)
     
 @app.route('/store/orders', methods=['GET', 'POST'])
 def store_orders():
@@ -683,17 +688,32 @@ def store_orders():
             order_id = request.form['order_id']
             new_status = request.form['delivery_status']
             tracking = request.form['tracking_number']
-            ship_dt = date.today().isoformat() if new_status in ('Shipped', 'Delivered') else None
-            deliv_dt = date.today().isoformat() if new_status == 'Delivered' else None
-            conn.execute("""
-                UPDATE Delivery SET status=?, tracking_number=?, employee_id=?,
-                ship_date=COALESCE(ship_date, ?), delivery_date=COALESCE(?, delivery_date)
+            current = conn.execute("SELECT status FROM Orders WHERE order_id=?", (order_id,)).fetchone()
+            if not current:
+                flash("Order not found.")
+                return redirect(url_for('store_orders'))
+            elif current['status'] in ('Shipped', 'Delivered') and new_status in ('Pending', 'Cancelled'):
+                flash("Cannot revert order status from Shipped/Delivered to Pending/Cancelled.")
+                return redirect(url_for('store_orders'))
+            elif current['status'] == 'Cancelled' and new_status == 'Delivered':
+                flash("Cannot update status of cancelled order to Delivered.")
+                return redirect(url_for('store_orders'))
+            elif current['status'] == 'Cancelled':
+                conn.execute("""
+                UPDATE Delivery SET tracking_number=?, employee_id=?
                 WHERE order_id=?
-            """, (new_status, tracking, session['employee_id'], ship_dt, deliv_dt, order_id))
-            if new_status == 'Cancelled':
-                conn.execute("UPDATE Orders SET status='Cancelled' WHERE order_id=?", (order_id,))
-            elif new_status in ('Shipped', 'Delivered'):
-                conn.execute("UPDATE Orders SET status=? WHERE order_id=?", (new_status, order_id))
+            """, (tracking, session['employee_id'], order_id))
+                cancel_order_and_restock(conn, order_id)
+                conn.commit()
+                flash(f"Tracking number updated for cancelled Order #{order_id}.")
+            else:
+                ship_date = date.today() if new_status == ('Shipped', 'Delivered') else None
+                deliv_date = date.today() if new_status == 'Delivered' else None
+                conn.execute("""
+                    UPDATE Delivery SET tracking_number=?, employee_id=?, ship_date=COALESCE(ship_date, ?), delivery_date=COALESCE(?, delivery_date) WHERE order_id=?
+                """, (tracking, session['employee_id'], ship_date, deliv_date, order_id))
+            elif new_status == 'Pending':
+                conn.execute("UPDATE Orders SET status='Paid' WHERE order_id=?", (order_id,))
             conn.commit()
             flash(f"Delivery & order status updated for Order #{order_id}.")
         elif action == 'process_return':
@@ -716,16 +736,22 @@ def store_orders():
                 flash(f"Return processed (${refund:.2f} refunded) and inventory restocked.")
             else:
                 flash("Invalid return quantity.")
-    orders = conn.execute("""
+    status_filter = request.args.get('status', '')
+    orders_sql = """
         SELECT o.*, c.first_name || ' ' || c.last_name AS customer_name, s.store_name,
-               d.tracking_number, d.ship_date, d.delivery_date, d.status AS delivery_status, pay.method AS payment_method
+                d.tracking_number, d.ship_date, d.delivery_date, d.status AS delivery_status, pay.method AS payment_method
         FROM Orders o
         JOIN Customer c ON o.customer_id = c.customer_id
         JOIN Store s ON o.store_id = s.store_id
         LEFT JOIN Delivery d ON o.order_id = d.order_id
         LEFT JOIN Payment pay ON o.order_id = pay.order_id
-        ORDER BY o.order_id DESC
-    """).fetchall()
+    """
+    orders_params = []
+    if status_filter:
+        orders_sql += " WHERE o.status = ?"
+        orders_params.append(status_filter)
+    orders_sql += " ORDER BY o.order_id DESC"
+    orders = conn.execute(orders_sql, orders_params).fetchall()
     order_items = conn.execute("""
         SELECT oi.order_id, oi.part_id, oi.quantity, p.part_number, p.part_name
         FROM Order_Item oi JOIN Part p ON oi.part_id = p.part_id
@@ -1035,17 +1061,19 @@ def store_employees():
             conn.commit()
             flash("Employee added successfully.")
         elif action == 'delete':
-            conn.execute(
-                "DELETE FROM Employee WHERE employee_id = ?",
-                (request.form['employee_id'],)
-            )
-            conn.commit()
-            flash("Employee removed.")
-
+            target_id = int(request.form['employee_id'])
+            if target_id == session.get('employee_id'):
+                flash("Cannot delete your own account while logged in.")
+            else:
+                try:
+                    conn.execute("DELETE FROM Employee WHERE employee_id=?", (target_id,))
+                    conn.commit()
+                    flash("Employee removed.")
+                except sqlite3.IntegrityError:
+                    flash("Cannot delete employee due to existing references in the database.")
     employees = conn.execute("SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id").fetchall()
     stores = conn.execute("SELECT * FROM Store").fetchall()
     conn.close()
-
     template = """
         {% extends "base" %}
         {% block content %}
@@ -1277,4 +1305,4 @@ def logout():
     session.clear()
     return redirect(url_for('browse_catalog'))
     if __name__ == '__main__':
-        app.run(debug=True, port=5000)
+        app.run(debug=os.environ.get('FLASK_DEBUG'), port=5000)
