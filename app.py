@@ -378,8 +378,18 @@ def store_login():
         {% endblock %}
     """
     return render_template_string(template, base=BASE_LAYOUT)
-
-
+    
+@app.route('/store/orders', methods=['GET', 'POST'])
+def store_orders():
+    
+@app.route('/store/purchase-orders', methods=['GET', 'POST'])
+def store_purchase_orders():
+    
+    
+@app.route('/store/database', methods=['GET', 'POST'])
+def store_db_management():
+    
+    
 @app.route('/store/employees', methods=['GET', 'POST'])
 def store_employees():
     if session.get('mode') != 'store':
