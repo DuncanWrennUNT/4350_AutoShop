@@ -1,12 +1,17 @@
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash
 from jinja2 import dictloader
+import os
+import secrets
 import sqlite3
 import uuid
 from datetime import date
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
-app.secret_key = 'retail_auto_parts_key'
+app.secret_key = os.environ.get('RETAIN_AUTO_PARTS_KEY') or secrets.token_hex(32)
+if not os.environ.get('RETAIN_AUTO_PARTS_KEY'):
+    print("Warning: Using a randomly generated secret key. For production, set the RETAIN_AUTO_PARTS_KEY environment variable.")
+
 
 def get_db_connection():
     conn = sqlite3.connect('auto_parts.db')
@@ -14,33 +19,41 @@ def get_db_connection():
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
-LAYOUT = """
+def cancel_order_and_restock(conn, order_id):
+    order = conn.execute("SELECT store_id FROM Orders WHERE order_id=?", (order_id,)).fetchone()
+    items = conn.execute("SELECT part_id, quantity FROM Order_Item WHERE order_id=?", (order_id,)).fetchall()
+    for item in items:
+        conn.execute("UPDATE Inventory SET quantity = quantity + ? WHERE part_id = ? AND store_id = ?", (item['quantity'], item['part_id'], order['store_id']))
+    conn.execute("UPDATE Order SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
+    conn.execute("UPDATE Delivery SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
+    conn.execute("UPDATE Payment SET status = 'Refunded' WHERE order_id = ?", (order_id,))
+    
+BASE_LAYOUT = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset = "UTF-8">
     <title>Management Center</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background-color: #f3f4f6; color: #333; }
-        header { background-color: #1e293b; color: white; padding: 18px 25px; text-align: center; border-bottom: 4px solid #38b82f6; }
-        header h1 { margin 0; font-size: 22px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background-color: #f3f4f6; color: #1f2937; }
+        header { background-color: #1e293b; color: white; padding: 18px 25px; display: flex; justify-content: space-between; align-items: center; border-bottom: 4px solid #3b82f6; }
+        header h1 { margin: 0; font-size: 22px; }
         .user-status { font-size: 14px; color: #cbd5e1; }
         
-        /* Menu Bar / Dropdowns */
         nav { background: #334155; display: flex; justify-content: center; flex-wrap: wrap; }
         .menu-item { position: relative; display: inline-block; }
-        .menu-btn { display: block; color: white; padding: 14px 22px; text-decoration: none; font-weight:600; border: none; background: transparent; font-size: 16px; cursor: pointer; }
+        .menu-btn { display: block; color: white; padding: 14px 22px; text-decoration: none; font-weight: 600; border: none; background: transparent; font-size: 15px; cursor: pointer; }
         .menu-item:hover { background-color: #475569; }
-        .dropdown { display: none; position: absolute; backgroun-color: white; min-width: 220px; box-shadow 0px 8px 16px rgba(0,0,0,0.15); z-index: 100; border-radius: 0 0 6px 6px; }
+        .dropdown { display: none; position: absolute; background-color: white; min-width: 220px; box-shadow 0px 8px 16px rgba(0,0,0,0.15); z-index: 100; border-radius: 0 0 6px 6px; }
         .dropdown a { color: #1e293b; padding: 11px 16px; text-decoration: none; display: block; font-size: 14px; border-bottom: 1px solid #f1f5f9; }
         .dropdown a:hover { background-color: #eff6ff; color: #2563eb; }
         .menu-item:hover .dropdown {display: block; }
 
-        .container {max-width: 1150px; margin: 25px auto; padding: 25px; background: white; border-radius: 8px; box-shadow: 0 2px 8px -1px rgba(0,0,0,0.08); }
+        .container {max-width: 1150px; margin: 25px auto; padding: 25px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
         th, td { border: 1px solid #e2e8f0; padding: 10px 12px; text-alighn: left; } 
         th { background-color: #f8fafc; color: #475569; }
-        .btn { background: #2563eb; color: white; padding: 7px 14px; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; dispaly: inline-block; }
+        .btn { background: #2563eb; color: white; padding: 7px 14px; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; dispaly: inline-block; }
         .btn:hover { background: #1d4ed8; }
         .btn-success { background: #16a34a; }
         .btn-success:hover { background: #15803d; }
@@ -55,7 +68,7 @@ LAYOUT = """
         .card { border: 1px solid #e2e8f0; padding: 18px; border-radius: 6px; background: #f8fafc; margin-bottom: 20px; }
         input, select, texturearea { padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px; }
         .form-row { margin-bottom: 12px; }
-        .form-row label { display: block; font-weight: 600l margin-bottom: 4px; font-size: 13px; }
+        .form-row label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 13px; }
         .form-row input, .form-row select { width: 95%; }
     </style>
 </head>
@@ -94,14 +107,14 @@ LAYOUT = """
             <button class ="menu-btn">Store Mode</button>
             <div class="dropdown">
                 {% if session.get('mode') == 'store'%}
-                    <a href="{{ url_for('store_orders') }}>Customer Orders, Deliveries & Returns</a>
-                    <a href="{{ url_for('store_purchase_orders') }}>Supplier Purchase Orders</a>
-                    <a href="{{ url_for('store_db_management') }}>Parts, Inventory & Store DB</a>
-                    <a href="{{ url_for('store_employees') }}>Employee Management</a>
+                    <a href="{{ url_for('store_orders') }}">Customer Orders, Deliveries & Returns</a>
+                    <a href="{{ url_for('store_purchase_orders') }}">Supplier Purchase Orders</a>
+                    <a href="{{ url_for('store_db_management') }}">Parts, Inventory & Store DB</a>
+                    <a href="{{ url_for('store_employees') }}">Employee Management</a>
                     <a href="{{ url_for('store_reports') }}">System Reports</a>
                     <a href="{{ url_for('logout') }}">Logout</a>
                 {% else %}
-                    <a href="{{ url_for('store_login') }}>Employee Login</a>
+                    <a href="{{ url_for('store_login') }}">Employee Login</a>
                 {% endif %}
             </div>
         </div>
@@ -121,7 +134,7 @@ LAYOUT = """
 </html>
 """
 
-app.jinja_loader = dictloader.DictLoader({'base': LAYOUT})
+app.jinja_loader = dictloader.DictLoader({'base': BASE_LAYOUT})
 
 #Start Route
 @app.route('/')
@@ -170,14 +183,14 @@ def browse_catalog():
             </tr>
             {% for p in parts %}
             <tr>
-                <td><strong>{{ p['[part_number'] }} </strong></td>
-                <td><a href="{{ url_for('part_detail', part_id=['part_id']) }}">{{ p['part_name'] }}</a></td>
+                <td><strong>{{ p['part_number'] }} </strong></td>
+                <td><a href="{{ url_for('part_detail', part_id=p['part_id']) }}">{{ p['part_name'] }}</a></td>
                 <td>{{ p['category'] }}</td>
                 <td>{{ p['part_condition'] }}</td>
                 <td>{{ "%%.2f"|format(p['unit_price']) }}</td>
                 <td>{{ p['store_name'] }}</td>
                 <td>
-                    {{ pt['quantity'] }}
+                    {{ p['quantity'] }}
                     {% if p['quantity'] == 0 %}
                         <span class="badge badge-danger">Out of Stock</span>
                     {% elif p['quantity'] <= p['reorder_level'] %}
@@ -188,11 +201,11 @@ def browse_catalog():
                 </td>
                 <td>
                     <a href="{{ url_for('part_detail', part_id=p['part_id']) }}" class="btn btn-secondary"> Details</a>
-                    {% if session.get('mode') == 'customer and part['quantity'] > 0 %}
-                        <form method="POST" action"{{ url_for('add_to_cart') }}" style="display:inline;">
-                            <input type="hidden" name="part_id" value"{{ p['part_id'] }}">
+                    {% if session.get('mode') == 'customer' and p['quantity'] > 0 %}
+                        <form method="POST" action="{{ url_for('add_to_cart') }}" style="display:inline;">
+                            <input type="hidden" name="part_id" value="{{ p['part_id'] }}">
                             <input type="hidden" name="store_id" value="{{ p['store_id'] }}">
-                            <input type="number" name="qty" value="1" min="1" max="{{part['quantity'] }}" style="width:45px;">
+                            <input type="number" name="qty" value="1" min="1" max="{{ p['quantity'] }}" style="width:45px;">
                             <button type="submit" class="btn btn-success">Add to Cart</button>
                         </form>
                     {% elif session.get('mode') == 'customer' %}
@@ -206,7 +219,7 @@ def browse_catalog():
         </table>
         {% endblock %}
         """
-    return render_template_string(template, parts=parts,stores=stores, search=search, store_filter=store_filter)
+    return render_template_string(template, parts=parts,stores=stores, search=search, store_filter=store_filter, base=BASE_LAYOUT)
 
 @app.route('/part/<int:part_id>')
 def part_detail(part_id):
@@ -601,6 +614,31 @@ def customer_history():
     {% endblock %}
         """
     return render_template_string(template, orders=orders)
+
+@app.route('/customer/cancel/<int:order_id>', methods=['POST'])
+def cancel_order(order_id):
+    if session.get('mode') != 'customer':
+        return redirect(url_for('customer_login'))
+    conn = get_db_connection()
+    conn.execute("""
+        SELECT o.status, d.status AS delivery_status
+        FROM Orders o
+        LEFT JOIN Delivery d ON o.order_id = d.order_id
+        WHERE o.order_id = ? AND o.customer_id = ?
+    """, (order_id, session['customer_id']))
+    row = conn.fetchone()
+    if not row:
+        flash("Order not found or you do not have permission to cancel this order.")
+        return redirect(url_for('customer_history'))
+    elif row['status'] in ('Shipped', 'Delivered') or row['delivery_status'] in ('Shipped', 'Delivered'):
+        flash("Cannot cancel an order that has already been shipped or delivered. Please contact customer support for assistance.")
+        return redirect(url_for('customer_history'))
+    else:
+        cancel_order_and_restock(conn, order_id)
+        conn.commit()
+        flash(f"Order #{order_id} has been cancelled. Your payment will be refunded within 5-7 business days.")
+    conn.close()
+    return redirect(url_for('customer_history'))
 
 #Store Operation Section
 @app.route('/store/login', methods=['GET', 'POST'])
