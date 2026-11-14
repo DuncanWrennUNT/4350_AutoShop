@@ -381,83 +381,125 @@ def store_login():
 
 
 @app.route('/store/employees', methods=['GET', 'POST'])
-def manage_employees():
+def store_employees():
     if session.get('mode') != 'store':
         return redirect(url_for('store_login'))
 
     conn = get_db_connection()
     if request.method == 'POST':
-        if 'add' in request.form:
-            conn.execute("""
-                INSERT INTO Employee (store_id, first_name, last_name, department, role, username, password_hash, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'Active')
+        if not is_manager:
+            flash("Permisson Denied: Only Store Managers can modify employee records.")
+            return redirect(url_for('store_employees'))
+        action = request.form.get('action)
+        if action == 'add':
+            try:
+                conn.execute("""
+                    INSERT INTO Employee (store_id, manager_id, first_name, last_name, department, role, phone, email, username, password_hash, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 """, (
-                    session.get('store_id'),
+                    rqeuest.form['store_id'],
+                    rqeuest.form['employee_id'],
                     request.form['first_name'],
                     request.form['last_name'],
-                    request.form.get('department'),
+                    request.form['department'],
                     request.form['role'],
+                    request.form['phone'],
+                    request.form['email'],
                     request.form['username'],
-                    generate_password_hash('welcome123')
-                ))
+                    generate_password_hash(request.form['hashed_password'])))
             conn.commit()
             flash("Employee added successfully.")
-        elif 'delete' in request.form:
+        elif action == 'delete':
             conn.execute(
-                'UPDATE Employee SET status = "Terminated" WHERE employee_id = ?',
+                "DELETE FROM Employee WHERE employee_id = ?",
                 (request.form['employee_id'],)
             )
             conn.commit()
-            flash("Employee record marked as inactive.")
+            flash("Employee removed.")
 
-    employees = conn.execute('SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id WHERE e.status = "Active"').fetchall()
+    employees = conn.execute("SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id").fetchall()
+    stores = conn.execute("SELECT * FROM Store").fetchall()
     conn.close()
 
     template = """
         {% extends "base" %}
         {% block content %}
-        <h1>Manage Employees</h1>
+        <h2>Manage Employees</h2>
+        {% if not is_manager %}
+            <p><em>Editing restricted to only Store Managers.</em></p>
+        {% else %}
+        <div class="card">
+            <h3>Add a new employee</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="add">
+                <div class ="grid-2">
+                    <div>
+                        <div class="form-row"><label>First Name</label><input type="text" name="first_name" required></div>
+                        <div class="form-row"><label>Last Name</label><input type="text" name="last_name" required></div>
+                        <div class="form-row"><label>Department</label><input type="text" name="department"></div>
+                        <div class="form-row"><label>Role</label><input type="text" name="role" placeholder="e.g. Store Manager, Sales Associate">></div>
+                        <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
+                    </div>
+                    <div>
+                        <div class="form-row"><label>Email</label><input type="email" name="email"></div>
+                        <div class="form-row"><label>Assigned Store</label><select name ="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %} </select></div>
+                        <div class="form-row"><label>Login Username</label><input type="text" name="username" required></div>
+                        <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-success">Add Employee</button>
+            </form>
+        </div>
+        {% endif %}
         <table>
             <tr>
                 <th>ID</th>
-                <th>First Name</th>
-                <th>Last Name</th>
+                <th>Name</th>
+                <th>Store</th>
                 <th>Department</th>
                 <th>Role</th>
-                <th>Actions</th>
+                <th>Status</th>
+                {% if is_manager %}<th>Actions</th>{% endif %}
             </tr>
             {% for e in employees %}
             <tr>
-                <td>{{ e.employee_id }}</td>
-                <td>{{ e.first_name }}</td>
-                <td>{{ e.last_name }}</td>
-                <td>{{ e.department }}</td>
-                <td>{{ e.role }}</td>
-                <td>
-                    <form method="POST">
-                        <input type="hidden" name="employee_id" value="{{ e.employee_id }}">
-                        <button type="submit" name="delete">Delete</button>
-                    </form>
-                </td>
+                <td>#{{ e['employee_id'] }}</td>
+                <td>{{ e['first_name'] }} {{ e['last_name'] }}, {{ e['username'] }}</td>
+                <td>{{ e['store_name'] }}</td>
+                {% if is_manager %}
+                    <td>
+                        <form method="POST" style="display:inline;">
+                            <input type="hidden" name="action" value="edit">
+                            <input type="hidden" name="employee_id" value="{{ e['employee_id' }}">
+                            <input type+"text" name="department" value="{{ e['department'] or ''}}"style="width:110px;">
+                            <input type="text" name="role" value="{{ e['role'] or '' }}"style="width:110px;">
+                            <select name="store_id">
+                                {% for s in stores %}<option value="{{ s['store_id'] }}" {% if s['store_id'] == e['store_id'] %}selected{% endif %}>{{ s['store_name'] }}</option>{% endfor %}
+                            </select>
+                            <select name="status">
+                                <option value = "Active" {% if e['status'] =='Active' %}selected{% endif %}>Active</option>
+                                <option value = "Inactive" {% if e['status'] =='Inactive' %}selected{% endif %}Inactive{/option>
+                            </select>
+                            <button type="submit" class="btn">Save</button>
+                        </form>
+                    </td>
+                    <td>
+                        <form method="POST" onsubmit="return confirm('Remove this employee?')">
+                            <input type="hidden" name="action" value="delete">
+                            <input type="hidden" name="employee_id" value="{{ e['employee_id'] }}">
+                            <button type="submit" class="btn btn-danger">Delete</button>
+                        </form>
+                    </td>
+                {% else %}
+                    <td>{{ e['department'] }}</td>
+                    <td>{{ e['role'] }}</td>
+                    <td>{{ e['status'] }}</td>
+                {% endif %}
             </tr>
             {% endfor %}
-        </table>
-        <h2>Add Employee</h2>
-        <form method="POST">
-            <label for="first_name">First Name:</label>
-            <input type="text" id="first_name" name="first_name" required>
-            <label for="last_name">Last Name:</label>
-            <input type="text" id="last_name" name="last_name" required>
-            <label for="department">Department:</label>
-            <input type="text" id="department" name="department">
-            <label for="role">Role:</label>
-            <input type="text" id="role" name="role" required>
-            <label for="username">Username:</label>
-            <input type="text" id="username" name="username" required>
-            <button type="submit" name="add">Add Employee</button>
-        </form>
-        {% endblock %}
-    """
+        <table>
+        {%endblock%}
+        """
     return render_template_string(template, employees=employees, base=BASE_LAYOUT)
 
 @app.route('/store/orders')
