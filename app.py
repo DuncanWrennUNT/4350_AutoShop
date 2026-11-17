@@ -24,7 +24,7 @@ def cancel_order_and_restock(conn, order_id):
     items = conn.execute("SELECT part_id, quantity FROM Order_Item WHERE order_id=?", (order_id,)).fetchall()
     for item in items:
         conn.execute("UPDATE Inventory SET quantity = quantity + ? WHERE part_id = ? AND store_id = ?", (item['quantity'], item['part_id'], order['store_id']))
-    conn.execute("UPDATE Order SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
+    conn.execute("UPDATE Orders SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
     conn.execute("UPDATE Delivery SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
     conn.execute("UPDATE Payment SET status = 'Refunded' WHERE order_id = ?", (order_id,))
     
@@ -230,7 +230,7 @@ def part_detail(part_id):
         LEFT JOIN Supplier sup ON p.supplier_id = sup.supplier_id
         WHERE p.part_id = ?
     """, (part_id,)).fetchone()
-    Stock = conn.execute("""
+    stock = conn.execute("""
         SELECT s.store_id, s.store_name, s.city, s.state, s.phone, i.quantity
         FROM Inventory i JOIN Store s on i.store_id = s.store_id
         WHERE i.part_id = ?
@@ -273,7 +273,7 @@ def part_detail(part_id):
         </table>
         {% endblock %}
         """
-    return render_template_string(template, part=part)
+    return render_template_string(template, part=part, stock=stock, base=BASE_LAYOUT)
 
 @app.route('/customer/register', methods=['GET', 'POST'])
 def customer_register():
@@ -306,7 +306,7 @@ def customer_register():
         except sqlite3.IntegrityError:
             flash("Username or email already exists. Please choose a different username or email.")
         conn.close()
-        template = """
+    template = """
         {% extends "base" %}
         {% block content %}
         <h2>Customer Account Registration</h2>
@@ -338,10 +338,10 @@ def customer_register():
         </form>
         {% endblock %}
         """
-        return render_template_string(template, stores=stores, current_year=date.today().year)
+    return render_template_string(template, stores=stores, current_year=date.today().year)
 
 
-@app.route('/customer/login', method=['GET', 'POST'])
+@app.route('/customer/login', methods=['GET', 'POST'])
 def customer_login():
     if request.method == 'POST':
         username, password = request.form['username'], request.form['password']
@@ -364,30 +364,9 @@ def customer_login():
     <div style="max-width:400px; margin:auto; padding:20px; border:1px solid #ccc; border_radius: 6px;">
         <h3>Customer Portal Auth</h3>
         <form method="POST">
-            <div class="grid-2">
-                <div class="card">
-                    <h3>Personal & Account Info</h3>
-                    <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
-                    <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
-                    <div class="form-row"><label>First Name</label><input type="text" name="first_name"></div>
-                    <div class="form-row"><label>Last Name</label><input type="text" name="last_name"></div>
-                    <div class="form-row"><label>Email</label><input type="text" name="email"></div>
-                    <div class="form-row"><label>Phone Number</label><input type="text" name="phone"></div>
-                </div>
-                <div class="card">
-                    <h3>Address & Vehicle Info</h3>
-                    <div class="form-row"><label>Street Address</label><input type="text" name="street"></div>
-                    <div class="form-row"><label>City</label><input type="text" name="city"></div>
-                    <div class="form-row"><label>State</label><input type="text" name="state"></div>
-                    <div class="form-row"><label>ZIP Code</label><input type="text" name="zip"></div>
-                    <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id" required> {% for s in stores %} <option value="{{ s.store_id }}">{{ s.store_name }}</option> {% endfor %} </select></div>
-                    <h4>Vehicle Information (Optional)</h4>
-                    <div class="form-row"><label>Vehicle Make</label><input type="text" name="make"></div>
-                    <div class="form-row"><label>Vehicle Model</label><input type="text" name="model"></div>
-                    <div class="form-row"><label>Vehicle Year</label><input type="number" name="year" min="1900" max="{{ current_year }}"></div>
-                </div>
-            </div>
-            <button type="submit" class="btn btn-success">Register Account</button>
+            <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
+            <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+            <button type="submit" class="btn btn-success">Login</button>
         </form>
     </div>
     {% endblock %}
@@ -521,7 +500,7 @@ def view_cart():
                 'store_name': part['store_name'],
                 'quantity': item['qty'],
                 'item_total': item_total,
-                'available_quantity': part['quantity']
+                'available_quantity': part['stock']
             })
     customer = conn.execute("SELECT * FROM Customer WHERE customer_id = ?", (session['customer_id'],)).fetchone()
     conn.close()
@@ -567,27 +546,30 @@ def checkout():
     total_amount = 0.0
     verified_items = []
     for item in cart:
-        part = cur.execute("SELECT p.unit_price, p.part_name FROM Part WHERE part_id = ?", (item['part_id'],)).fetchone()
+        part = cur.execute("SELECT p.unit_price, p.part_name FROM Part p WHERE part_id = ?", (item['part_id'],)).fetchone()
         inv = cur.execute("SELECT quantity FROM Inventory WHERE part_id = ? AND store_id = ?", (item['part_id'], item['store_id'])).fetchone()
         if not part or inv['quantity'] < item['qty']:
             flash(f"Insufficient stock for part ID {item['part_id']} at store ID {item['store_id']}.")
-            total_amount += part['unit_price'] * item['qty']
-            verified_items.append((item['part_id'], item['quantity'], part['unit_price']))
-        cur.execute("INSERT INTO ORDERS(customer_id, store_id, status, total_amount) VALUES (?, ?, 'Paid', ?)", (session['customer_id'], store_id, total_amount))
-        order_id = cur.lastrowid
-        for pid, qty, price in verified_items:
-            cur.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)", (order_id, pid, qty, price))
-            cur.execute("UPDATE Inventory SET quantity = quantity - ? WHERE part_id = ? AND store_id = ?", (qty, pid, store_id))
-            card_num = request.form['card_number'].strip()
-            last4 = card_num[-4:] if len(card_num) >= 4 else '0000'
-            cur.execute("""INSERT INTO Payment(order_id, payment_method, card_type, card_last4, billing_address, amount, status) VALUES (?, 'Credit Card', ?, ?, ?, ?)", (order_id, request.form['method'], request.form['card_type'], last4, request.form['billing_address'], total_amount, 'Approved')""")
-            tracking = f"TRK-{uuid.uuid4().hex[:8].upper()}"
-            cur.execute("INSERT INTO Delivery(order_id, tracking_number, status) VALUES (?, ?, 'Processing')", (order_id, tracking))
-            conn.commit()
-            conn.close()
-            session['cart'] = []
-            flash(f"Order placed successfully! Your order ID is {order_id}. Tracking number: {tracking}")
-            return redirect(url_for('customer_history'))
+            conn.close
+            return redirect(url_for('view_cart'))
+        total_amount += part['unit_price'] * item['qty']
+        verified_items.append((item['part_id'], item['qty'], part['unit_price']))
+
+    cur.execute("INSERT INTO ORDERS(customer_id, store_id, status, total_amount) VALUES (?, ?, 'Paid', ?)", (session['customer_id'], store_id, total_amount))
+    order_id = cur.lastrowid
+    for pid, qty, price in verified_items:
+        cur.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)", (order_id, pid, qty, price))
+        cur.execute("UPDATE Inventory SET quantity = quantity - ? WHERE part_id = ? AND store_id = ?", (qty, pid, store_id))
+    card_num = request.form['card_number'].strip()
+    last4 = card_num[-4:] if len(card_num) >= 4 else '0000'
+    cur.execute("""INSERT INTO Payment(order_id, method, card_type, card_last4, billing_address, amount, status) VALUES (?, ?, ?, ?, ?, ?)", (order_id, request.form.get('method', 'Credit Card'), request.form.get('card_type', 'Visa'), last4, request.form.get('billing_address', ''), total_amount, 'Approved')""")
+    tracking =f"TRK-{uuid.uuid4().hex[:8].upper()}"
+    cur.execute("INSERT INTO Delivery(order_id, tracking_number, status) VALUES (?, ?, 'Pending')", (order_id, tracking))
+    conn.commit()
+    conn.close()
+    session['cart'] = []
+    flash(f"Order placed successfully! Your order ID is {order_id}. Tracking number: {tracking}")
+    return redirect(url_for('customer_history'))
 
 @app.route('/customer/history')
 def customer_history():
@@ -1049,7 +1031,7 @@ def store_employees():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 """, (
                     request.form['store_id'],
-                    request.form['manager_id'],
+                    request.form.get('manager_id') or None,
                     request.form['first_name'],
                     request.form['last_name'],
                     request.form['department'],
@@ -1057,9 +1039,23 @@ def store_employees():
                     request.form['phone'],
                     request.form['email'],
                     request.form['username'],
-                    generate_password_hash(request.form['hashed_password'])))
+                    generate_password_hash(request.form['password'])))
             conn.commit()
             flash("Employee added successfully.")
+        elif action == 'edit':
+            conn.execute("""
+                UPDATE Employee SET department=?, role=?, store_id=?, status=?
+                WHERE employee_id=?
+            """, (
+                request.form['department'],
+                request.form['role'],
+                request.form['store_id'],
+                request.form['status'],
+                request.form['employee_id']
+            ))
+            conn.commit()
+            flash("Employee updated successfully.")
+
         elif action == 'delete':
             target_id = int(request.form['employee_id'])
             if target_id == session.get('employee_id'):
@@ -1153,9 +1149,9 @@ def store_employees():
         <table>
         {%endblock%}
         """
-    return render_template_string(template, employees=employees)
+    return render_template_string(template, employees=employees, is_manager=is_manager, stores=stores)
 
-@app.route('/store/orders')
+@app.route('/store/orders/log')
 def order_management():
     if session.get('mode') != 'store': return redirect(url_for('store_login'))
     conn = get_db_connection()
@@ -1193,113 +1189,116 @@ def order_management():
     {% endblock %}
     """
     return render_template_string(template, orders=orders)
-    @app.route('/store/reports')
-    def store_reports():
-        if session.get('mode') != 'store': return redirect(url_for('store_login'))
-        conn = get_db_connection()
-        low_stock = conn.execute("SELECT * FROM v_low_stock").fetchall()
-        daily = conn.execute("SELECT * FROM v_daily_sales").fetchall()
-        weekly = conn.execute("SELECT * FROM v_weekly_sales").fetchall()
-        monthly = conn.execute("SELECT * FROM v_monthly_sales").fetchall()
-        emp_status = conn.execute("SELECT * FROM v_employee_status").fetchall()
-        conn.close()
-        template = """
-        {% extends "base" %}
-        {% block content %}
-        <h3>1. Low Stock Reorder Alert</h2>
-        <table>
-            <tr>
-                <th>Store</th>
-                <th>Part Name</th>
-                <th>Part #</th>
-                <th>Quantity</th>
-                <th>Reorder Level</th>
-            </tr>
-            {% for item in low_stock %}
-            <tr>
-                <td>{{ item['store_name'] }}</td>
-                <td>{{ item['part_number'] }}</td>
-                <td>{{ item['part_name'] }}</td>
-                <td>{{ item['quantity'] }}</td>
-                <td>{{ item['reorder_level'] }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        <h3>2.Daily Sales (v_daily_sales)</h3>
-        <table>
-            <tr>
-                <th>Store</th>
-                <th>Date</th>
-                <th>Orders</th>
-                <th>Revenue</th>
-            </tr>
-            {% for r in monthly %}
-            <tr>
-                <td>{{ r['store_name'] }}</td>
-                <td>{{ r['period'] }}</td>
-                <td>{{ r['order_count'] }}</td>
-                <td>{{ "%.2f"|format(r['revenue']) }}</td>
-            </tr>
-            {% endfor %}
-        <h3>3. Weekly Sales (v_weekly_sales)</h3>
-        <table>
-            <tr>
-                <th>Store</th>
-                <th>Week</th>
-                <th>Orders</th>
-                <th>Revenue</th>
-            </tr>
-            {% for r in monthly %}
-            <tr>
-                <td>{{ r['store_name'] }}</td>
-                <td>{{ r['period'] }}</td>
-                <td>{{ r['order_count'] }}</td>
-                <td>{{ "%.2f"|format(r['revenue']) }}</td>
-            </tr>
-            {% endfor %}
-        <h3>4. Monthly Sales (v_monthly_sales)</h3>
-        <table>
-            <tr>
-                <th>Store</th>
-                <th>Month</th>
-                <th>Orders</th>
-                <th>Revenue</th>
-            </tr>
-            {% for r in monthly %}
-            <tr>
-                <td>{{ r['store_name'] }}</td>
-                <td>{{ r['period'] }}</td>
-                <td>{{ r['order_count'] }}</td>
-                <td>{{ "%.2f"|format(r['revenue']) }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        <h3>5. Employee Status Report (v_employee_status)</h3>
-        <table>
-            <tr>
-                <th>ID</th>
-                <th>Employee</th>
-                <th>Store</th>
-                <th>Department</th>
-                <th>Role</th>
-                <th>Manager</th>
-                <th>Status</th>
-            </tr>
-            {% for e in emp_status %}
-            <tr>
-                <td>#{{ e['employee_id'] }}</td>
-                <td>{{ e['employee_name'] }}</td>
-                <td>{{ e['store_name'] }}</td>
-                <td>{{ e['department'] }}</td>
-                <td>{{ e['role'] }}</td>
-                <td>{{ e['manager_name'] }}</td>
-                <td>{{ e['status'] }}</td>
-            </tr>
-            {% endfor %}
-            </table>
-        {% endblock %}
-        """
-    return render_template_string(template, low_stock=low_stock, store_metrics=store_metrics, base=BASE_LAYOUT)
+@app.route('/store/reports')
+def store_reports():
+    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+conn = get_db_connection()
+low_stock = conn.execute("SELECT * FROM v_low_stock").fetchall()
+daily = conn.execute("SELECT * FROM v_daily_sales").fetchall()
+weekly = conn.execute("SELECT * FROM v_weekly_sales").fetchall()
+monthly = conn.execute("SELECT * FROM v_monthly_sales").fetchall()
+emp_status = conn.execute("SELECT * FROM v_employee_status").fetchall()
+conn.close()
+template = """
+{% extends "base" %}
+{% block content %}
+<h3>1. Low Stock Reorder Alert</h2>
+<table>
+    <tr>
+        <th>Store</th>
+        <th>Part Name</th>
+        <th>Part #</th>
+        <th>Quantity</th>
+        <th>Reorder Level</th>
+    </tr>
+    {% for item in low_stock %}
+        <tr>
+            <td>{{ item['store_name'] }}</td>
+            <td>{{ item['part_number'] }}</td>
+            <td>{{ item['part_name'] }}</td>
+            <td>{{ item['quantity'] }}</td>
+            <td>{{ item['reorder_level'] }}</td>
+        </tr>
+    {% endfor %}
+</table>
+<h3>2.Daily Sales (v_daily_sales)</h3>
+<table>
+    <tr>
+        <th>Store</th>
+        <th>Date</th>
+        <th>Orders</th>
+        <th>Revenue</th>
+    </tr>
+    {% for r in monthly %}
+        <tr>
+            <td>{{ r['store_name'] }}</td>
+            <td>{{ r['period'] }}</td>
+            <td>{{ r['order_count'] }}</td>
+            <td>{{ "%.2f"|format(r['revenue']) }}</td>
+        </tr>
+    {% endfor %}
+</table>
+<h3>3. Weekly Sales (v_weekly_sales)</h3>
+    <table>
+        <tr>
+            <th>Store</th>
+            <th>Week</th>
+            <th>Orders</th>
+            <th>Revenue</th>
+        </tr>
+        {% for r in monthly %}
+        <tr>
+            <td>{{ r['store_name'] }}</td>
+            <td>{{ r['period'] }}</td>
+            <td>{{ r['order_count'] }}</td>
+            <td>{{ "%.2f"|format(r['revenue']) }}</td>
+        </tr>
+    {% endfor %}
+ </table>
+<h3>4. Monthly Sales (v_monthly_sales)</h3>
+<table>
+        <tr>
+            <th>Store</th>
+            <th>Month</th>
+            <th>Orders</th>
+            <th>Revenue</th>
+        </tr>
+    {% for r in monthly %}
+    <tr>
+        <td>{{ r['store_name'] }}</td>
+        <td>{{ r['period'] }}</td>
+        <td>{{ r['order_count'] }}</td>
+        <td>{{ "%.2f"|format(r['revenue']) }}</td>
+    </tr>
+    {% endfor %}
+</table>
+<h3>5. Employee Status Report (v_employee_status)</h3>
+<table>
+    <tr>
+        <th>ID</th>
+        <th>Employee</th>
+        <th>Store</th>
+        <th>Department</th>
+        <th>Role</th>
+        <th>Manager</th>
+        <th>Status</th>
+    </tr>
+    {% for e in emp_status %}
+    <tr>
+        <td>#{{ e['employee_id'] }}</td>
+        <td>{{ e['employee_name'] }}</td>
+        <td>{{ e['store_name'] }}</td>
+        <td>{{ e['department'] }}</td>
+        <td>{{ e['role'] }}</td>
+        <td>{{ e['manager_name'] }}</td>
+        <td>{{ e['status'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
+"""
+
+return render_template_string(template, low_stock=low_stock, daily=daily, weekly=weekly, monthly=monthly, emp_status=emp_status, store_metrics=store_metrics, base=BASE_LAYOUT)
 @app.route('/logout')
 def logout():
     session.clear()
