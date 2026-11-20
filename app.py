@@ -1,11 +1,13 @@
-from flask import Flask, render_template_string, request, redirect, url_for, session, flash
-from jinja2 import dictloader
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash, abort
+from jinja2 import DictLoader
 import os
 import secrets
 import sqlite3
 import uuid
 from datetime import date
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from database import DB_PATH, init_db
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('RETAIN_AUTO_PARTS_KEY') or secrets.token_hex(32)
@@ -14,10 +16,11 @@ if not os.environ.get('RETAIN_AUTO_PARTS_KEY'):
 
 
 def get_db_connection():
-    conn = sqlite3.connect('auto_parts.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
 
 def cancel_order_and_restock(conn, order_id):
     order = conn.execute("SELECT store_id FROM Orders WHERE order_id=?", (order_id,)).fetchone()
@@ -27,60 +30,65 @@ def cancel_order_and_restock(conn, order_id):
     conn.execute("UPDATE Orders SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
     conn.execute("UPDATE Delivery SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
     conn.execute("UPDATE Payment SET status = 'Refunded' WHERE order_id = ?", (order_id,))
-    
+
+
 BASE_LAYOUT = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset = "UTF-8">
-    <title>Management Center</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Auto Shop Operating System</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background-color: #f3f4f6; color: #1f2937; }
         header { background-color: #1e293b; color: white; padding: 18px 25px; display: flex; justify-content: space-between; align-items: center; border-bottom: 4px solid #3b82f6; }
         header h1 { margin: 0; font-size: 22px; }
         .user-status { font-size: 14px; color: #cbd5e1; }
-        
+
         nav { background: #334155; display: flex; justify-content: center; flex-wrap: wrap; }
         .menu-item { position: relative; display: inline-block; }
         .menu-btn { display: block; color: white; padding: 14px 22px; text-decoration: none; font-weight: 600; border: none; background: transparent; font-size: 15px; cursor: pointer; }
         .menu-item:hover { background-color: #475569; }
-        .dropdown { display: none; position: absolute; background-color: white; min-width: 220px; box-shadow 0px 8px 16px rgba(0,0,0,0.15); z-index: 100; border-radius: 0 0 6px 6px; }
+        .dropdown { display: none; position: absolute; background-color: white; min-width: 260px; box-shadow: 0px 8px 16px rgba(0,0,0,0.15); z-index: 100; border-radius: 0 0 6px 6px; }
         .dropdown a { color: #1e293b; padding: 11px 16px; text-decoration: none; display: block; font-size: 14px; border-bottom: 1px solid #f1f5f9; }
         .dropdown a:hover { background-color: #eff6ff; color: #2563eb; }
-        .menu-item:hover .dropdown {display: block; }
+        .menu-item:hover .dropdown { display: block; }
 
-        .container {max-width: 1150px; margin: 25px auto; padding: 25px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .container { max-width: 1150px; margin: 25px auto; padding: 25px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
-        th, td { border: 1px solid #e2e8f0; padding: 10px 12px; text-alighn: left; } 
+        th, td { border: 1px solid #e2e8f0; padding: 10px 12px; text-align: left; vertical-align: top; }
         th { background-color: #f8fafc; color: #475569; }
-        .btn { background: #2563eb; color: white; padding: 7px 14px; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; dispaly: inline-block; }
+        .btn { background: #2563eb; color: white; padding: 7px 14px; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; display: inline-block; }
         .btn:hover { background: #1d4ed8; }
         .btn-success { background: #16a34a; }
         .btn-success:hover { background: #15803d; }
         .btn-danger { background: #dc2626; }
         .btn-danger:hover { background: #b91c1c; }
-        .btn-secondary { background : #64748b; }
+        .btn-secondary { background: #64748b; }
         .badge { padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
-        .badge-low { background-color: #fee2e2; color: #991b1b; }
+        .badge-low { background-color: #fef3c7; color: #92400e; }
+        .badge-danger { background-color: #fee2e2; color: #991b1b; }
         .badge-ok { background-color: #dcfce7; color: #166534; }
+        .badge-warn { background-color: #e0e7ff; color: #3730a3; }
         .flash { padding: 12px; background-color: #eff6ff; border-left: 4px solid #3b82f6; color: #1e40af; margin-bottom: 20px; border-radius: 4px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .card { border: 1px solid #e2e8f0; padding: 18px; border-radius: 6px; background: #f8fafc; margin-bottom: 20px; }
-        input, select, texturearea { padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px; }
+        input, select, textarea { padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 14px; }
         .form-row { margin-bottom: 12px; }
         .form-row label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 13px; }
         .form-row input, .form-row select { width: 95%; }
+        .muted { color: #64748b; font-size: 12px; }
     </style>
 </head>
 
 <body>
     <header>
-        <h1> Auto Shop Operating System</h1>
-        <div class = "user-status'>
-            {% if session.get('mode') == 'customer %}
-                Customer: <strong>{{session['username'] }}</strong> | Cart: <strong>{{ session.get('cart', [])|length }} </strong> item(s)
-            {% elif session.get('mode') == 'store'%}
-                Staff: <strong>{{ session['username']}}</strong> ({{ session{'role']}})
+        <h1>Auto Shop Operating System</h1>
+        <div class="user-status">
+            {% if session.get('mode') == 'customer' %}
+                Customer: <strong>{{ session['username'] }}</strong> | Cart: <strong>{{ session.get('cart', [])|length }}</strong> item(s)
+            {% elif session.get('mode') == 'store' %}
+                Staff: <strong>{{ session['username'] }}</strong> ({{ session['role'] }})
             {% else %}
                 Guest Mode
             {% endif %}
@@ -88,13 +96,13 @@ BASE_LAYOUT = """
     </header>
     <nav>
         <div class="menu-item">
-            <button class = "menu-btn"> Customer Mode</button>
+            <button class="menu-btn">Customer Mode</button>
             <div class="dropdown">
                 <a href="{{ url_for('browse_catalog') }}">Browse & Search Parts</a>
                 {% if session.get('mode') == 'customer' %}
-                    <a href="{{ url_for('view_cart') }}">Browse & Search Parts</a>
+                    <a href="{{ url_for('view_cart') }}">Shopping Cart & Checkout</a>
                     <a href="{{ url_for('customer_history') }}">My Orders & Returns</a>
-                    <a href="{{ url_for('customer_profile') }}">My Profiles & Vehicles</a>
+                    <a href="{{ url_for('customer_profile') }}">My Profile & Vehicles</a>
                     <a href="{{ url_for('logout') }}">Logout</a>
                 {% else %}
                     <a href="{{ url_for('customer_login') }}">Customer Login</a>
@@ -104,10 +112,11 @@ BASE_LAYOUT = """
         </div>
 
         <div class="menu-item">
-            <button class ="menu-btn">Store Mode</button>
+            <button class="menu-btn">Store Mode</button>
             <div class="dropdown">
-                {% if session.get('mode') == 'store'%}
+                {% if session.get('mode') == 'store' %}
                     <a href="{{ url_for('store_orders') }}">Customer Orders, Deliveries & Returns</a>
+                    <a href="{{ url_for('order_management') }}">Order Log</a>
                     <a href="{{ url_for('store_purchase_orders') }}">Supplier Purchase Orders</a>
                     <a href="{{ url_for('store_db_management') }}">Parts, Inventory & Store DB</a>
                     <a href="{{ url_for('store_employees') }}">Employee Management</a>
@@ -120,11 +129,11 @@ BASE_LAYOUT = """
         </div>
     </nav>
 
-    <div class= "container">
-        {% with messages = get_flashed_message() %}
+    <div class="container">
+        {% with messages = get_flashed_messages() %}
             {% if messages %}
-                {%for message in messages %}
-                    <div class="flash"> {{ message }} </div>
+                {% for message in messages %}
+                    <div class="flash">{{ message }}</div>
                 {% endfor %}
             {% endif %}
         {% endwith %}
@@ -134,16 +143,17 @@ BASE_LAYOUT = """
 </html>
 """
 
-app.jinja_loader = dictloader.DictLoader({'base': BASE_LAYOUT})
+app.jinja_loader = DictLoader({'base': BASE_LAYOUT})
 
-#Start Route
+
+# Start Route
 @app.route('/')
 def browse_catalog():
     search = request.args.get('search', '').strip()
     store_filter = request.args.get('store_id', '')
     conn = get_db_connection()
     stores = conn.execute("SELECT * FROM Store").fetchall()
-    
+
     sql = """
         SELECT p.*, s.store_id, s.store_name, i.quantity, i.reorder_level
         FROM Part p
@@ -152,42 +162,43 @@ def browse_catalog():
         WHERE 1=1
     """
     params = []
-    
+
     if search:
         sql += " AND (p.part_name LIKE ? OR p.part_number LIKE ? OR p.category LIKE ?)"
         params.extend([f'%{search}%', f'%{search}%', f'%{search}%'])
     if store_filter:
         sql += " AND s.store_id = ?"
         params.append(store_filter)
-    parts = conn.execute (sql, params).fetchall()
+    sql += " ORDER BY p.part_number, s.store_name"
+    parts = conn.execute(sql, params).fetchall()
     conn.close()
-    
+
     template = """
         {% extends "base" %}
         {% block content %}
-        <h2> Auto Parts Catalog</h2>
-        <form method="GET" style= "display:flex; gap:10px; margin-bottom 15px;">
-            <input type="text" name="search" style="flex:2;" placeholder = "Search catalog items by name or part code" value ="{{ search }}">
+        <h2>Auto Parts Catalog</h2>
+        <form method="GET" style="display:flex; gap:10px; margin-bottom:15px;">
+            <input type="text" name="search" style="flex:2;" placeholder="Search catalog items by name, part number or category" value="{{ search }}">
             <select name="store_id" style="flex:1;">
                 <option value="">All Store Branches</option>
                 {% for s in stores %}
-                    <option value="{{ s['store_id'] }}" {% if store_filter == s['store_id']|string %}selected{%endif %>{{ s['store_name'] }}</option>
+                    <option value="{{ s['store_id'] }}" {% if store_filter == s['store_id']|string %}selected{% endif %}>{{ s['store_name'] }}</option>
                 {% endfor %}
             </select>
-            <button type="submit" class"btn">Search</button>
+            <button type="submit" class="btn">Search</button>
         </form>
-        
+        {% if not parts %}<p>No parts match your search.</p>{% endif %}
         <table>
             <tr>
                 <th>Part #</th><th>Part Name</th><th>Category</th><th>Condition</th><th>Price</th><th>Location</th><th>Inventory</th><th>Action</th>
             </tr>
             {% for p in parts %}
             <tr>
-                <td><strong>{{ p['part_number'] }} </strong></td>
+                <td><strong>{{ p['part_number'] }}</strong></td>
                 <td><a href="{{ url_for('part_detail', part_id=p['part_id']) }}">{{ p['part_name'] }}</a></td>
                 <td>{{ p['category'] }}</td>
                 <td>{{ p['part_condition'] }}</td>
-                <td>{{ "%%.2f"|format(p['unit_price']) }}</td>
+                <td>${{ "%.2f"|format(p['unit_price']) }}</td>
                 <td>{{ p['store_name'] }}</td>
                 <td>
                     {{ p['quantity'] }}
@@ -196,11 +207,11 @@ def browse_catalog():
                     {% elif p['quantity'] <= p['reorder_level'] %}
                         <span class="badge badge-low">Low Stock</span>
                     {% else %}
-                        <span class="badge badge-ok'>In Stock</span>
+                        <span class="badge badge-ok">In Stock</span>
                     {% endif %}
                 </td>
                 <td>
-                    <a href="{{ url_for('part_detail', part_id=p['part_id']) }}" class="btn btn-secondary"> Details</a>
+                    <a href="{{ url_for('part_detail', part_id=p['part_id']) }}" class="btn btn-secondary">Details</a>
                     {% if session.get('mode') == 'customer' and p['quantity'] > 0 %}
                         <form method="POST" action="{{ url_for('add_to_cart') }}" style="display:inline;">
                             <input type="hidden" name="part_id" value="{{ p['part_id'] }}">
@@ -210,8 +221,8 @@ def browse_catalog():
                         </form>
                     {% elif session.get('mode') == 'customer' %}
                         <span style="color:gray; font-size:12px;">Out of Stock</span>
-                    {% else %}
-                        <small style="color:gray;">
+                    {% elif session.get('mode') != 'store' %}
+                        <small style="color:gray;">Log in to order</small>
                     {% endif %}
                 </td>
             </tr>
@@ -219,61 +230,65 @@ def browse_catalog():
         </table>
         {% endblock %}
         """
-    return render_template_string(template, parts=parts,stores=stores, search=search, store_filter=store_filter, base=BASE_LAYOUT)
+    return render_template_string(template, parts=parts, stores=stores, search=search, store_filter=store_filter)
+
 
 @app.route('/part/<int:part_id>')
 def part_detail(part_id):
     conn = get_db_connection()
     part = conn.execute("""
         SELECT p.*, sup.supplier_name
-        FROM Part p 
+        FROM Part p
         LEFT JOIN Supplier sup ON p.supplier_id = sup.supplier_id
         WHERE p.part_id = ?
     """, (part_id,)).fetchone()
     stock = conn.execute("""
         SELECT s.store_id, s.store_name, s.city, s.state, s.phone, i.quantity
-        FROM Inventory i JOIN Store s on i.store_id = s.store_id
+        FROM Inventory i JOIN Store s ON i.store_id = s.store_id
         WHERE i.part_id = ?
     """, (part_id,)).fetchall()
     conn.close()
+    if part is None:
+        abort(404)
     template = """
     {% extends "base" %}
     {% block content %}
     <a href="{{ url_for('browse_catalog') }}">&larr; Back to Catalog</a>
-    
-    <h2>{{ part['part_name']}} ){{ part['part_number'] }})</h2>
-    <p>Category: {{ part['category'] }} | Condition {{ part['part_condition'] }}</p>
+
+    <h2>{{ part['part_name'] }} ({{ part['part_number'] }})</h2>
+    <p>Category: {{ part['category'] }} | Condition: <strong>{{ part['part_condition'] }}</strong> | Supplier: {{ part['supplier_name'] or '-' }}</p>
     <p>Unit Price: <strong>${{ "%.2f"|format(part['unit_price']) }}</strong></p>
-    <Description: {{part['description'] }}</p>
+    <p>Description: {{ part['description'] or '-' }}</p>
     <h3>Store Branch Availability</h3>
     <table>
-        <tr><th>Branch</th><th>Location></th><th>Phone</th><th>Quantity</th><th>Order</th></tr>
+        <tr><th>Branch</th><th>Location</th><th>Phone</th><th>Available Quantity</th><th>Order</th></tr>
         {% for s in stock %}
         <tr>
             <td>{{ s['store_name'] }}</td>
-            <td>{{s['city"] }}, {{s['state'] }}</td>
+            <td>{{ s['city'] }}, {{ s['state'] }}</td>
             <td>{{ s['phone'] }}</td>
             <td>{{ s['quantity'] }}</td>
             <td>
                 {% if session.get('mode') == 'customer' and s['quantity'] > 0 %}
                     <form method="POST" action="{{ url_for('add_to_cart') }}">
-                        <input type="hidden" name="part_id" value"{{ part['part_id'] }}">
-                            <input type="hidden" name="store_id" value="{{ s['store_id'] }}">
-                            <input type="number" name="qty" value="1" min="1" max="{{s['quantity'] }}" style="width:55px;">
-                            <button type="submit" class="btn btn-success">Add to Cart</button>
-                        </form>
-                    {% elif session.get('mode') != 'customer' %}
-                        <a href="{{ url_for('customer_login') }}">Log in to order</a>
-                    {% else %}
-                        <span class='badge badge-dange">Out of Stock</span>
-                    {% elseif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% endblock %}
-        """
-    return render_template_string(template, part=part, stock=stock, base=BASE_LAYOUT)
+                        <input type="hidden" name="part_id" value="{{ part['part_id'] }}">
+                        <input type="hidden" name="store_id" value="{{ s['store_id'] }}">
+                        <input type="number" name="qty" value="1" min="1" max="{{ s['quantity'] }}" style="width:55px;">
+                        <button type="submit" class="btn btn-success">Add to Cart</button>
+                    </form>
+                {% elif session.get('mode') != 'customer' %}
+                    <a href="{{ url_for('customer_login') }}">Log in to order</a>
+                {% else %}
+                    <span class="badge badge-danger">Out of Stock</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endblock %}
+    """
+    return render_template_string(template, part=part, stock=stock)
+
 
 @app.route('/customer/register', methods=['GET', 'POST'])
 def customer_register():
@@ -281,31 +296,33 @@ def customer_register():
     stores = conn.execute("SELECT * FROM Store").fetchall()
     if request.method == 'POST':
         try:
-            conn.execute("""INSERT INTO Customer (preferred_store_id, first_name, last_name, email, phone, street, city, state, zip, username, password_hash)
+            cur = conn.cursor()
+            cur.execute("""INSERT INTO Customer (preferred_store_id, first_name, last_name, email, phone, street, city, state, zip, username, password_hash)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                request.form['preferred_store_id'],
-                request.form['first_name'],
-                request.form['last_name'],
-                request.form['email'],
-                request.form['phone'],
-                request.form['street'],
-                request.form['city'],
-                request.form['state'],
-                request.form['zip'],
-                request.form['username'],
+                request.form.get('preferred_store_id') or None,
+                request.form['first_name'].strip(),
+                request.form['last_name'].strip(),
+                request.form['email'].strip(),
+                request.form.get('phone', '').strip(),
+                request.form['street'].strip(),
+                request.form['city'].strip(),
+                request.form['state'].strip(),
+                request.form['zip'].strip(),
+                request.form['username'].strip(),
                 generate_password_hash(request.form['password'])
             ))
-            cust_id = conn.lastrowid
+            cust_id = cur.lastrowid
             if request.form.get('make') and request.form.get('model'):
-                conn.execute("INSERT INTO Customer_Vehicle (customer_id, make, model, year) VALUES (?, ?, ?, ?)", 
-                             (cust_id, request.form['make'], request.form['model'], request.form['year']))
+                cur.execute("INSERT INTO Customer_Vehicle (customer_id, make, model, year) VALUES (?, ?, ?, ?)",
+                            (cust_id, request.form['make'], request.form['model'], request.form.get('year') or None))
             conn.commit()
+            conn.close()
             flash("Customer account created successfully. Please log in.")
             return redirect(url_for('customer_login'))
         except sqlite3.IntegrityError:
             flash("Username or email already exists. Please choose a different username or email.")
-        conn.close()
+    conn.close()
     template = """
         {% extends "base" %}
         {% block content %}
@@ -319,19 +336,19 @@ def customer_register():
                     <div class="form-row"><label>Email</label><input type="email" name="email" required></div>
                     <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
                     <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
-                    <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+                    <div class="form-row"><label>Password</label><input type="password" name="password" minlength="6" required></div>
                 </div>
                 <div class="card">
                     <h3>Address, Store & Vehicle</h3>
-                    <div class="form-row"><label>Street Address</label><input type="text" name="address" required></div>
+                    <div class="form-row"><label>Street Address</label><input type="text" name="street" required></div>
                     <div class="form-row"><label>City</label><input type="text" name="city" required></div>
-                    <div class="form-row"><label>State</label><input type="text" name="state" required></div>
-                    <div class="form-row"><label>ZIP Code</label><input type="text" name="zip" required></div>
+                    <div class="form-row"><label>State</label><input type="text" name="state" maxlength="2" required></div>
+                    <div class="form-row"><label>ZIP Code</label><input type="text" name="zip" maxlength="10" required></div>
                     <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %}</select></div>
                     <h4>Vehicle Information (Optional)</h4>
                     <div class="form-row"><label>Make</label><input type="text" name="make"></div>
                     <div class="form-row"><label>Model</label><input type="text" name="model"></div>
-                    <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year }}"></div>
+                    <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year + 1 }}"></div>
                 </div>
             </div>
             <button type="submit" class="btn btn-success">Create Account</button>
@@ -349,54 +366,61 @@ def customer_login():
         user = conn.execute('SELECT * FROM Customer WHERE username = ?', (username,)).fetchone()
         conn.close()
         if user and check_password_hash(user['password_hash'], password):
-             session.clear()
-             session['mode'] = 'customer'
-             session['customer_id'] = user['customer_id']
-             session['username'] = f"{user['first_name']} {user['last_name']}"
-             session['cart'] = []
-             flash(f"Customer session initialized for user {username}")
-             return redirect(url_for('browse_catalog'))
-        flash("Invalid secure validation credentials.")
+            session.clear()
+            session['mode'] = 'customer'
+            session['customer_id'] = user['customer_id']
+            session['username'] = f"{user['first_name']} {user['last_name']}"
+            session['cart'] = []
+            flash(f"Welcome back, {user['first_name']}! You are logged in.")
+            return redirect(url_for('browse_catalog'))
+        flash("Invalid username or password.")
 
     template = """
     {% extends "base" %}
     {% block content %}
-    <div style="max-width:400px; margin:auto; padding:20px; border:1px solid #ccc; border_radius: 6px;">
-        <h3>Customer Portal Auth</h3>
+    <div class="card" style="max-width:400px; margin:auto;">
+        <h3>Customer Login</h3>
         <form method="POST">
             <div class="form-row"><label>Username</label><input type="text" name="username" required></div>
             <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
             <button type="submit" class="btn btn-success">Login</button>
         </form>
+        <p class="muted">New customer? <a href="{{ url_for('customer_register') }}">Create an account</a>.<br>
+        Demo account: customer1 / custpwd</p>
     </div>
     {% endblock %}
     """
     return render_template_string(template)
 
-@app.route('/customer/profile')
+
+@app.route('/customer/profile', methods=['GET', 'POST'])
 def customer_profile():
     if session.get('mode') != 'customer':
         return redirect(url_for('customer_login'))
     conn = get_db_connection()
     if request.method == 'POST':
         if 'update_profile' in request.form:
-            conn.execute("""
-                UPDATE Customer SET first_name = ?, last_name = ?, email = ?, phone = ?, street = ?, city = ?, state = ?, zip = ?, preferred_store_id = ?
-                WHERE customer_id = ?
-            """, (
-                request.form['first_name'],
-                request.form['last_name'],
-                request.form['email'],
-                request.form['phone'],
-                request.form['street'],
-                request.form['city'],
-                request.form['state'],
-                request.form['zip'],
-                request.form['preferred_store_id'],
-                session['customer_id']
-            ))
-            conn.commit()
-            flash("Profile updated successfully.")
+            try:
+                conn.execute("""
+                    UPDATE Customer SET first_name = ?, last_name = ?, email = ?, phone = ?, street = ?, city = ?, state = ?, zip = ?, preferred_store_id = ?
+                    WHERE customer_id = ?
+                """, (
+                    request.form['first_name'],
+                    request.form['last_name'],
+                    request.form['email'],
+                    request.form['phone'],
+                    request.form['street'],
+                    request.form['city'],
+                    request.form['state'],
+                    request.form['zip'],
+                    request.form['preferred_store_id'],
+                    session['customer_id']
+                ))
+                conn.commit()
+                session['username'] = f"{request.form['first_name']} {request.form['last_name']}"
+                flash("Profile updated successfully.")
+            except sqlite3.IntegrityError:
+                flash("That email is already used by another account.")
         elif 'add_vehicle' in request.form:
             conn.execute("""
                 INSERT INTO Customer_Vehicle (customer_id, make, model, year)
@@ -409,6 +433,10 @@ def customer_profile():
             ))
             conn.commit()
             flash("Vehicle added successfully.")
+        elif 'remove_vehicle' in request.form:
+            conn.execute("DELETE FROM Customer_Vehicle WHERE vehicle_id = ? AND customer_id = ?", (request.form['vehicle_id'], session['customer_id']))
+            conn.commit()
+            flash("Vehicle removed.")
     customer = conn.execute("SELECT * FROM Customer WHERE customer_id = ?", (session['customer_id'],)).fetchone()
     vehicles = conn.execute("SELECT * FROM Customer_Vehicle WHERE customer_id = ?", (session['customer_id'],)).fetchall()
     stores = conn.execute("SELECT * FROM Store").fetchall()
@@ -420,13 +448,15 @@ def customer_profile():
     <div class="grid-2">
         <div class="card">
             <h3>Contact & Billing Information</h3>
-            <p>Name: {{ customer['first_name'] }} {{ customer['last_name'] }} ({{ customer['email'] }})</p>
             <form method="POST">
-                <div class="form-row"><label>Phone</label><input type="text" name="phone" value="{{ customer['phone'] }}"></div>
-                <div class="form-row"><label>Street</label><input type="text" name="street" value="{{ customer['street'] }}"></div>
-                <div class="form-row"><label>City</label><input type="text" name="city" value="{{ customer['city'] }}"></div>
-                <div class="form-row"><label>State</label><input type="text" name="state" value="{{ customer['state'] }}"></div>
-                <div class="form-row"><label>ZIP</label><input type="text" name="zip" value="{{ customer['zip'] }}"></div>
+                <div class="form-row"><label>First Name</label><input type="text" name="first_name" value="{{ customer['first_name'] }}" required></div>
+                <div class="form-row"><label>Last Name</label><input type="text" name="last_name" value="{{ customer['last_name'] }}" required></div>
+                <div class="form-row"><label>Email</label><input type="email" name="email" value="{{ customer['email'] }}" required></div>
+                <div class="form-row"><label>Phone</label><input type="text" name="phone" value="{{ customer['phone'] or '' }}"></div>
+                <div class="form-row"><label>Street</label><input type="text" name="street" value="{{ customer['street'] or '' }}"></div>
+                <div class="form-row"><label>City</label><input type="text" name="city" value="{{ customer['city'] or '' }}"></div>
+                <div class="form-row"><label>State</label><input type="text" name="state" value="{{ customer['state'] or '' }}"></div>
+                <div class="form-row"><label>ZIP</label><input type="text" name="zip" value="{{ customer['zip'] or '' }}"></div>
                 <div class="form-row"><label>Preferred Store</label><select name="preferred_store_id">{% for s in stores %}<option value="{{ s['store_id'] }}" {% if customer['preferred_store_id'] == s['store_id'] %}selected{% endif %}>{{ s['store_name'] }}</option>{% endfor %}</select></div>
                 <button type="submit" name="update_profile" class="btn btn-success">Update Profile</button>
             </form>
@@ -434,11 +464,12 @@ def customer_profile():
         <div class="card">
             <h3>My Vehicles</h3>
             {% if vehicles %}
-                <ul>
+                <table>
                     {% for v in vehicles %}
-                        <li>{{ v['year'] }} {{ v['make'] }} {{ v['model'] }}</li>
+                        <tr><td>{{ v['year'] }} {{ v['make'] }} {{ v['model'] }}</td>
+                            <td><form method="POST"><input type="hidden" name="vehicle_id" value="{{ v['vehicle_id'] }}"><button type="submit" name="remove_vehicle" class="btn btn-danger">Remove</button></form></td></tr>
                     {% endfor %}
-                </ul>
+                </table>
             {% else %}
                 <p>No vehicles registered.</p>
             {% endif %}
@@ -446,7 +477,7 @@ def customer_profile():
             <form method="POST">
                 <div class="form-row"><label>Make</label><input type="text" name="make" required></div>
                 <div class="form-row"><label>Model</label><input type="text" name="model" required></div>
-                <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year }}" required></div>
+                <div class="form-row"><label>Year</label><input type="number" name="year" min="1900" max="{{ current_year + 1 }}" required></div>
                 <button type="submit" name="add_vehicle" class="btn btn-success">Add Vehicle</button>
             </form>
         </div>
@@ -455,11 +486,19 @@ def customer_profile():
     """
     return render_template_string(template, customer=customer, vehicles=vehicles, stores=stores, current_year=date.today().year)
 
+
 @app.route('/customer/cart/add', methods=['POST'])
 def add_to_cart():
     if session.get('mode') != 'customer':
         return redirect(url_for('customer_login'))
-    part_id, store_id, qty, cart = request.form['part_id'], request.form['store_id'], int(request.form['qty']), session.get('cart', [])
+    part_id, store_id, cart = request.form['part_id'], request.form['store_id'], session.get('cart', [])
+    try:
+        qty = int(request.form['qty'])
+    except ValueError:
+        qty = 0
+    if qty < 1:
+        flash("Quantity must be at least 1.")
+        return redirect(request.referrer or url_for('browse_catalog'))
     if cart and cart[0]['store_id'] != store_id:
         flash("You can only add items from one store at a time. Please clear your cart to add items from a different store.")
         return redirect(url_for('view_cart'))
@@ -473,10 +512,20 @@ def add_to_cart():
     flash(f"Added {qty} item(s) to your shopping cart.")
     return redirect(url_for('browse_catalog'))
 
+
 @app.route('/customer/cart', methods=['GET', 'POST'])
 def view_cart():
     if session.get('mode') != 'customer':
         return redirect(url_for('customer_login'))
+    if request.method == 'POST':
+        cart = session.get('cart', [])
+        if 'clear_cart' in request.form:
+            cart = []
+            flash("Shopping cart cleared.")
+        elif 'remove_part' in request.form:
+            cart = [i for i in cart if i['part_id'] != request.form['remove_part']]
+            flash("Item removed from cart.")
+        session['cart'] = cart
     conn = get_db_connection()
     cart = session.get('cart', [])
     cart_details = []
@@ -505,32 +554,51 @@ def view_cart():
     customer = conn.execute("SELECT * FROM Customer WHERE customer_id = ?", (session['customer_id'],)).fetchone()
     conn.close()
     template = """
-        {% extends "base" %}
-        {% block content %}
-        <h2>Shopping Cart</h2>
-        {% if not cart_details %}
-        <p>Your shopping cart is empty.</p>
-        {% else %}
+    {% extends "base" %}
+    {% block content %}
+    <h2>Shopping Cart</h2>
+    {% if not cart_details %}
+        <p>Your shopping cart is empty. <a href="{{ url_for('browse_catalog') }}">Browse parts</a>.</p>
+    {% else %}
         <table>
-            <tr><th>Part Name</th><th>Store</th><th>Unit Price</th><th>Quantity</th><th>Total</th></tr>
+            <tr><th>Part #</th><th>Part Name</th><th>Store</th><th>Unit Price</th><th>Quantity</th><th>Total</th><th></th></tr>
             {% for item in cart_details %}
             <tr>
+                <td>{{ item['part_number'] }}</td>
                 <td>{{ item['part_name'] }}</td>
                 <td>{{ item['store_name'] }}</td>
                 <td>${{ "%.2f"|format(item['unit_price']) }}</td>
-                <td>{{ item['quantity'] }} (Available: {{ item['available_quantity'] }})</td>
+                <td>{{ item['quantity'] }} <span class="muted">(Available: {{ item['available_quantity'] }})</span></td>
                 <td>${{ "%.2f"|format(item['item_total']) }}</td>
+                <td><form method="POST"><button type="submit" name="remove_part" value="{{ item['part_id'] }}" class="btn btn-danger">Remove</button></form></td>
             </tr>
             {% endfor %}
-            <tr><td colspan="4" style="text-align:right;"><strong>Total Amount:</strong></td><td>${{ "%.2f"|format(total_amount) }}</td></tr>
+            <tr><td colspan="5" style="text-align:right;"><strong>Total Amount:</strong></td><td colspan="2"><strong>${{ "%.2f"|format(total_amount) }}</strong></td></tr>
         </table>
-        <form method="POST" action="{{ url_for('checkout') }}">
-            <button type="submit" class="btn btn-primary">Proceed to Checkout</button>
-        </form>
+        <form method="POST" style="margin-top:10px;"><button type="submit" name="clear_cart" class="btn btn-secondary">Clear Cart</button></form>
+
+        <div class="card" style="margin-top:20px; max-width:520px;">
+            <h3>Payment</h3>
+            <form method="POST" action="{{ url_for('checkout') }}">
+                <div class="form-row"><label>Payment Option</label>
+                    <select name="method"><option value="Credit Card">Credit Card</option><option value="Debit Card">Debit Card</option></select>
+                </div>
+                <div class="form-row"><label>Card Type</label>
+                    <select name="card_type"><option>Visa</option><option>Mastercard</option><option>American Express</option><option>Discover</option></select>
+                </div>
+                <div class="form-row"><label>Card Number</label><input type="text" name="card_number" inputmode="numeric" pattern="[0-9 ]{12,19}" placeholder="4242 4242 4242 4242" required></div>
+                <div class="form-row"><label>Billing Address</label>
+                    <input type="text" name="billing_address" value="{{ customer['street'] }}, {{ customer['city'] }}, {{ customer['state'] }} {{ customer['zip'] }}" required></div>
+                <div class="form-row"><label>Amount</label><input type="text" value="${{ '%.2f'|format(total_amount) }}" readonly></div>
+                <p class="muted">Only the card type and last 4 digits are stored.</p>
+                <button type="submit" class="btn btn-success">Pay & Place Order</button>
+            </form>
+        </div>
     {% endif %}
-{% endblock %}
+    {% endblock %}
     """
     return render_template_string(template, cart_details=cart_details, total_amount=total_amount, customer=customer)
+
 
 @app.route('/customer/checkout', methods=['POST'])
 def checkout():
@@ -540,6 +608,10 @@ def checkout():
     if not cart:
         flash("Your shopping cart is empty.")
         return redirect(url_for('view_cart'))
+    card_num = request.form.get('card_number', '').replace(' ', '').replace('-', '')
+    if not card_num.isdigit() or not 12 <= len(card_num) <= 19:
+        flash("Please enter a valid card number (12-19 digits).")
+        return redirect(url_for('view_cart'))
     conn = get_db_connection()
     cur = conn.cursor()
     store_id = cart[0]['store_id']
@@ -548,28 +620,31 @@ def checkout():
     for item in cart:
         part = cur.execute("SELECT p.unit_price, p.part_name FROM Part p WHERE part_id = ?", (item['part_id'],)).fetchone()
         inv = cur.execute("SELECT quantity FROM Inventory WHERE part_id = ? AND store_id = ?", (item['part_id'], item['store_id'])).fetchone()
-        if not part or inv['quantity'] < item['qty']:
-            flash(f"Insufficient stock for part ID {item['part_id']} at store ID {item['store_id']}.")
-            conn.close
+        if not part or not inv or inv['quantity'] < item['qty']:
+            name = part['part_name'] if part else f"part ID {item['part_id']}"
+            flash(f"Insufficient stock for {name} at the selected store. Please lower the quantity.")
+            conn.close()
             return redirect(url_for('view_cart'))
         total_amount += part['unit_price'] * item['qty']
         verified_items.append((item['part_id'], item['qty'], part['unit_price']))
+    total_amount = round(total_amount, 2)
 
-    cur.execute("INSERT INTO ORDERS(customer_id, store_id, status, total_amount) VALUES (?, ?, 'Paid', ?)", (session['customer_id'], store_id, total_amount))
+    cur.execute("INSERT INTO Orders (customer_id, store_id, status, total_amount) VALUES (?, ?, 'Paid', ?)", (session['customer_id'], store_id, total_amount))
     order_id = cur.lastrowid
     for pid, qty, price in verified_items:
-        cur.execute("INSERT INTO Order_Item(order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)", (order_id, pid, qty, price))
+        cur.execute("INSERT INTO Order_Item (order_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)", (order_id, pid, qty, price))
         cur.execute("UPDATE Inventory SET quantity = quantity - ? WHERE part_id = ? AND store_id = ?", (qty, pid, store_id))
-    card_num = request.form['card_number'].strip()
-    last4 = card_num[-4:] if len(card_num) >= 4 else '0000'
-    cur.execute("""INSERT INTO Payment(order_id, method, card_type, card_last4, billing_address, amount, status) VALUES (?, ?, ?, ?, ?, ?)", (order_id, request.form.get('method', 'Credit Card'), request.form.get('card_type', 'Visa'), last4, request.form.get('billing_address', ''), total_amount, 'Approved')""")
-    tracking =f"TRK-{uuid.uuid4().hex[:8].upper()}"
-    cur.execute("INSERT INTO Delivery(order_id, tracking_number, status) VALUES (?, ?, 'Pending')", (order_id, tracking))
+    last4 = card_num[-4:]
+    cur.execute("""INSERT INTO Payment (order_id, method, card_type, card_last4, billing_address, amount, status) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (order_id, request.form.get('method', 'Credit Card'), request.form.get('card_type', 'Visa'), last4, request.form.get('billing_address', ''), total_amount, 'Approved'))
+    tracking = f"TRK-{uuid.uuid4().hex[:8].upper()}"
+    cur.execute("INSERT INTO Delivery (order_id, tracking_number, status) VALUES (?, ?, 'Pending')", (order_id, tracking))
     conn.commit()
     conn.close()
     session['cart'] = []
     flash(f"Order placed successfully! Your order ID is {order_id}. Tracking number: {tracking}")
     return redirect(url_for('customer_history'))
+
 
 @app.route('/customer/history')
 def customer_history():
@@ -577,44 +652,96 @@ def customer_history():
         return redirect(url_for('customer_login'))
     conn = get_db_connection()
     orders = conn.execute("""
-        SELECT o.order_id, o.order_date, o.status, o.total_amount, p.part_name, oi.quantity
-        FROM Order o
-        JOIN Order_Item oi ON o.order_id = oi.order_id
-        JOIN Part p ON oi.part_id = p.part_id
+        SELECT o.order_id, o.order_date, o.status, o.total_amount, s.store_name,
+               d.status AS delivery_status, d.tracking_number, d.ship_date, d.delivery_date,
+               pay.method, pay.card_type, pay.card_last4
+        FROM Orders o
+        JOIN Store s ON o.store_id = s.store_id
+        LEFT JOIN Delivery d ON o.order_id = d.order_id
+        LEFT JOIN Payment pay ON o.order_id = pay.order_id
         WHERE o.customer_id = ? ORDER BY o.order_date DESC
     """, (session['customer_id'],)).fetchall()
+    items = conn.execute("""
+        SELECT oi.order_id, oi.quantity, oi.unit_price, p.part_number, p.part_name
+        FROM Order_Item oi JOIN Part p ON oi.part_id = p.part_id
+        JOIN Orders o ON oi.order_id = o.order_id
+        WHERE o.customer_id = ?
+    """, (session['customer_id'],)).fetchall()
+    returns = conn.execute("""
+        SELECT r.return_id, r.return_date, r.order_id, p.part_name, r.quantity, r.reason, r.refund_amount
+        FROM Return_Item r JOIN Orders o ON r.order_id = o.order_id JOIN Part p ON r.part_id = p.part_id
+        WHERE o.customer_id = ? ORDER BY r.return_date DESC
+    """, (session['customer_id'],)).fetchall()
     conn.close()
+    items_by_order = {}
+    for it in items:
+        items_by_order.setdefault(it['order_id'], []).append(it)
     template = """
-        {%extends "base" %}
-        {%block content %}
-        <h1>Customer Order History</h1>
+    {% extends "base" %}
+    {% block content %}
+    <h2>Customer Order History</h2>
+    {% if not orders %}<p>You have not placed any orders yet.</p>{% endif %}
+    <table>
+        <tr><th>Order #</th><th>Date</th><th>Store</th><th>Items</th><th>Total</th><th>Payment</th><th>Status / Delivery</th><th>Action</th></tr>
         {% for o in orders %}
+        <tr>
+            <td>#{{ o['order_id'] }}</td>
+            <td>{{ o['order_date'] }}</td>
+            <td>{{ o['store_name'] }}</td>
+            <td>
+                {% for it in items_by_order.get(o['order_id'], []) %}
+                    {{ it['quantity'] }} x {{ it['part_name'] }} (${{ "%.2f"|format(it['unit_price']) }})<br>
+                {% endfor %}
+            </td>
+            <td>${{ "%.2f"|format(o['total_amount']) }}</td>
+            <td>{{ o['card_type'] or o['method'] }} {% if o['card_last4'] %}****{{ o['card_last4'] }}{% endif %}</td>
+            <td><span class="badge badge-warn">{{ o['status'] }}</span><br>
+                <span class="muted">Delivery: {{ o['delivery_status'] }} | {{ o['tracking_number'] }}<br>
+                Shipped: {{ o['ship_date'] or '-' }} | Delivered: {{ o['delivery_date'] or '-' }}</span></td>
+            <td>
+                {% if o['status'] in ('Pending', 'Paid') and o['delivery_status'] not in ('Shipped', 'Delivered') %}
+                <form method="POST" action="{{ url_for('cancel_order', order_id=o['order_id']) }}" onsubmit="return confirm('Cancel this order?')">
+                    <button type="submit" class="btn btn-danger">Cancel</button>
+                </form>
+                {% else %}-{% endif %}
+            </td>
+        </tr>
         {% endfor %}
-    Order ID
-        Date/Time Timestamp Details | Quantity Ordered | Total Invoice | Fulfillment Status
-        #{{ o.order_id }} | {{ o.order_date }} | {{ o.part_name }} | {{ o.quantity }} | ${{ "%.2f"|format(o['total_amount']) }} | {{ o.status }
+    </table>
+
+    <h3 style="margin-top:30px;">My Returns</h3>
+    {% if not returns %}<p>No returns on file.</p>{% else %}
+    <table>
+        <tr><th>Return #</th><th>Date</th><th>Order #</th><th>Part</th><th>Qty</th><th>Reason</th><th>Refund</th></tr>
+        {% for r in returns %}
+        <tr><td>#{{ r['return_id'] }}</td><td>{{ r['return_date'] }}</td><td>#{{ r['order_id'] }}</td><td>{{ r['part_name'] }}</td>
+            <td>{{ r['quantity'] }}</td><td>{{ r['reason'] }}</td><td>${{ "%.2f"|format(r['refund_amount']) }}</td></tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    <p class="muted">To return a delivered part, bring it to the store; an employee will log the return and refund.</p>
     {% endblock %}
-        """
-    return render_template_string(template, orders=orders)
+    """
+    return render_template_string(template, orders=orders, items_by_order=items_by_order, returns=returns)
+
 
 @app.route('/customer/cancel/<int:order_id>', methods=['POST'])
 def cancel_order(order_id):
     if session.get('mode') != 'customer':
         return redirect(url_for('customer_login'))
     conn = get_db_connection()
-    conn.execute("""
+    row = conn.execute("""
         SELECT o.status, d.status AS delivery_status
         FROM Orders o
         LEFT JOIN Delivery d ON o.order_id = d.order_id
         WHERE o.order_id = ? AND o.customer_id = ?
-    """, (order_id, session['customer_id']))
-    row = conn.fetchone()
+    """, (order_id, session['customer_id'])).fetchone()
     if not row:
         flash("Order not found or you do not have permission to cancel this order.")
-        return redirect(url_for('customer_history'))
-    elif row['status'] in ('Shipped', 'Delivered') or row['delivery_status'] in ('Shipped', 'Delivered'):
-        flash("Cannot cancel an order that has already been shipped or delivered. Please contact customer support for assistance.")
-        return redirect(url_for('customer_history'))
+    elif row['status'] == 'Cancelled':
+        flash("This order is already cancelled.")
+    elif row['status'] in ('Shipped', 'Delivered', 'Returned') or row['delivery_status'] in ('Shipped', 'Delivered'):
+        flash("Cannot cancel an order that has already been shipped or delivered. Please contact the store for a return.")
     else:
         cancel_order_and_restock(conn, order_id)
         conn.commit()
@@ -622,12 +749,13 @@ def cancel_order(order_id):
     conn.close()
     return redirect(url_for('customer_history'))
 
-#Store Operation Section
+
+# Store Operation Section
 @app.route('/store/login', methods=['GET', 'POST'])
 def store_login():
     if request.method == 'POST':
         conn = get_db_connection()
-        emp = conn.execute('SELECT * FROM Employee WHERE username = ? AND status="Active" ', (request.form['username'],)).fetchone()
+        emp = conn.execute("SELECT * FROM Employee WHERE username = ? AND status = 'Active'", (request.form['username'],)).fetchone()
         conn.close()
         if emp and check_password_hash(emp['password_hash'], request.form['password']):
             session.clear()
@@ -635,9 +763,9 @@ def store_login():
             session['employee_id'] = emp['employee_id']
             session['store_id'] = emp['store_id']
             session['role'] = emp['role']
-            session['username'] = f"{emp['first_name']} {emp['last_name']} ({emp['role']})"
+            session['username'] = f"{emp['first_name']} {emp['last_name']}"
             flash("Store login successful.")
-            return redirect(url_for('manage_employees'))
+            return redirect(url_for('store_orders'))
         else:
             flash("Invalid store credentials.")
 
@@ -649,64 +777,75 @@ def store_login():
             <form method="POST">
                 <div class="form-row"><label>Employee Username</label><input type="text" name="username" required></div>
                 <div class="form-row"><label>Employee Password</label><input type="password" name="password" required></div>
-                <button type="submit">Login</button>
+                <button type="submit" class="btn btn-success">Login</button>
             </form>
-        <p style="font-size:12px; color:#64748b;">
-            Manager Demo: Manager1 / adminpwd<br>
-            Staff Demo: Staff1 / staffpwd
-        </p>
-    </div>
-    {% endblock %}
+            <p class="muted">
+                Manager Demo: Manager1 / adminpwd<br>
+                Staff Demo: Staff1 / staffpwd
+            </p>
+        </div>
+        {% endblock %}
     """
-    return render_template_string(template, base=BASE_LAYOUT)
-    
+    return render_template_string(template)
+
+
 @app.route('/store/orders', methods=['GET', 'POST'])
 def store_orders():
-    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
     conn = get_db_connection()
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'update_delivery':
             order_id = request.form['order_id']
             new_status = request.form['delivery_status']
-            tracking = request.form['tracking_number']
-            current = conn.execute("SELECT status FROM Orders WHERE order_id=?", (order_id,)).fetchone()
+            tracking = request.form['tracking_number'].strip() or None
+            current = conn.execute("SELECT o.status, d.status AS delivery_status FROM Orders o LEFT JOIN Delivery d ON o.order_id = d.order_id WHERE o.order_id=?", (order_id,)).fetchone()
             if not current:
                 flash("Order not found.")
-                return redirect(url_for('store_orders'))
-            elif current['status'] in ('Shipped', 'Delivered') and new_status in ('Pending', 'Cancelled'):
-                flash("Cannot revert order status from Shipped/Delivered to Pending/Cancelled.")
-                return redirect(url_for('store_orders'))
-            elif current['status'] == 'Cancelled' and new_status == 'Delivered':
-                flash("Cannot update status of cancelled order to Delivered.")
-                return redirect(url_for('store_orders'))
             elif current['status'] == 'Cancelled':
-                conn.execute("""
-                UPDATE Delivery SET tracking_number=?, employee_id=?
-                WHERE order_id=?
-            """, (tracking, session['employee_id'], order_id))
+                flash(f"Order #{order_id} is cancelled and can no longer be updated.")
+            elif current['delivery_status'] in ('Shipped', 'Delivered') and new_status in ('Pending', 'Cancelled'):
+                flash("Cannot revert order status from Shipped/Delivered to Pending/Cancelled.")
+            elif new_status == 'Cancelled':
+                conn.execute("UPDATE Delivery SET tracking_number=?, employee_id=? WHERE order_id=?", (tracking, session['employee_id'], order_id))
                 cancel_order_and_restock(conn, order_id)
                 conn.commit()
-                flash(f"Tracking number updated for cancelled Order #{order_id}.")
+                flash(f"Order #{order_id} cancelled, items restocked and payment marked refunded.")
             else:
-                ship_date = date.today() if new_status == ('Shipped', 'Delivered') else None
-                deliv_date = date.today() if new_status == 'Delivered' else None
-                conn.execute("""
-                    UPDATE Delivery SET tracking_number=?, employee_id=?, ship_date=COALESCE(ship_date, ?), delivery_date=COALESCE(?, delivery_date) WHERE order_id=?
-                """, (tracking, session['employee_id'], ship_date, deliv_date, order_id))
-            elif new_status == 'Pending':
-                conn.execute("UPDATE Orders SET status='Paid' WHERE order_id=?", (order_id,))
-            conn.commit()
-            flash(f"Delivery & order status updated for Order #{order_id}.")
+                today = date.today().isoformat()
+                ship_date = today if new_status in ('Shipped', 'Delivered') else None
+                deliv_date = today if new_status == 'Delivered' else None
+                try:
+                    conn.execute("""
+                        UPDATE Delivery SET status=?, tracking_number=?, employee_id=?, ship_date=COALESCE(ship_date, ?), delivery_date=COALESCE(delivery_date, ?)
+                        WHERE order_id=?
+                    """, (new_status, tracking, session['employee_id'], ship_date, deliv_date, order_id))
+                    if current['status'] != 'Returned':
+                        order_status = 'Paid' if new_status == 'Pending' else new_status
+                        conn.execute("UPDATE Orders SET status=? WHERE order_id=?", (order_status, order_id))
+                    conn.commit()
+                    flash(f"Delivery & order status updated for Order #{order_id}.")
+                except sqlite3.IntegrityError:
+                    flash("That tracking number is already used by another order.")
         elif action == 'process_return':
-            order_id = int(request.form['order_id'])
-            part_id = int(request.form['part_id'])
-            qty = int(request.form['quantity'])
-            reason = request.form['reason']
+            try:
+                order_id, part_id = (int(x) for x in request.form['order_part'].split(':'))
+                qty = int(request.form['quantity'])
+            except (ValueError, KeyError):
+                order_id = part_id = qty = 0
+            reason = request.form.get('reason', '')
             oi = conn.execute("SELECT unit_price, quantity FROM Order_Item WHERE order_id=? AND part_id=?", (order_id, part_id)).fetchone()
-            ord_row = conn.execute("SELECT store_id FROM Orders WHERE order_id=?", (order_id,)).fetchone()
-            if oi and qty <= oi['quantity']:
-                refund = oi['unit_price'] * qty
+            ord_row = conn.execute("SELECT store_id, status FROM Orders WHERE order_id=?", (order_id,)).fetchone()
+            already = conn.execute("SELECT IFNULL(SUM(quantity), 0) AS q FROM Return_Item WHERE order_id=? AND part_id=?", (order_id, part_id)).fetchone()['q']
+            if not oi or not ord_row:
+                flash("Order line not found.")
+            elif ord_row['status'] == 'Cancelled':
+                flash("Cancelled orders cannot be returned; they were already refunded.")
+            elif qty < 1 or qty + already > oi['quantity']:
+                flash(f"Invalid return quantity. Ordered {oi['quantity']}, already returned {already}.")
+            else:
+                refund = round(oi['unit_price'] * qty, 2)
                 conn.execute("""
                     INSERT INTO Return_Item (order_id, part_id, employee_id, quantity, reason, refund_amount)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -716,12 +855,11 @@ def store_orders():
                 conn.execute("UPDATE Orders SET status='Returned' WHERE order_id=?", (order_id,))
                 conn.commit()
                 flash(f"Return processed (${refund:.2f} refunded) and inventory restocked.")
-            else:
-                flash("Invalid return quantity.")
     status_filter = request.args.get('status', '')
     orders_sql = """
         SELECT o.*, c.first_name || ' ' || c.last_name AS customer_name, s.store_name,
-                d.tracking_number, d.ship_date, d.delivery_date, d.status AS delivery_status, pay.method AS payment_method
+               d.tracking_number, d.ship_date, d.delivery_date, d.status AS delivery_status,
+               pay.method AS payment_method, pay.card_type, pay.status AS payment_status
         FROM Orders o
         JOIN Customer c ON o.customer_id = c.customer_id
         JOIN Store s ON o.store_id = s.store_id
@@ -737,12 +875,24 @@ def store_orders():
     order_items = conn.execute("""
         SELECT oi.order_id, oi.part_id, oi.quantity, p.part_number, p.part_name
         FROM Order_Item oi JOIN Part p ON oi.part_id = p.part_id
+        JOIN Orders o ON oi.order_id = o.order_id
+        WHERE o.status != 'Cancelled'
+        ORDER BY oi.order_id DESC
     """).fetchall()
     conn.close()
     template = """
     {% extends "base" %}
     {% block content %}
     <h2>Customer Order, Delivery & Return Management</h2>
+    <form method="GET">
+        <label>Filter by order status:</label>
+        <select name="status" onchange="this.form.submit()">
+            <option value="">All</option>
+            {% for st in ['Paid', 'Shipped', 'Delivered', 'Cancelled', 'Returned'] %}
+            <option value="{{ st }}" {% if status_filter == st %}selected{% endif %}>{{ st }}</option>
+            {% endfor %}
+        </select>
+    </form>
     <table>
         <tr><th>Order #</th><th>Customer</th><th>Branch</th><th>Order Date</th><th>Payment</th><th>Total</th><th>Delivery & Tracking</th><th>Update Status</th></tr>
         {% for o in orders %}
@@ -751,13 +901,15 @@ def store_orders():
             <td>{{ o['customer_name'] }}</td>
             <td>{{ o['store_name'] }}</td>
             <td>{{ o['order_date'] }}</td>
-            <td>{{ o['payment_method'] }}</td>
+            <td>{{ o['payment_method'] }}<br><span class="muted">{{ o['card_type'] }} - {{ o['payment_status'] }}</span></td>
             <td>${{ "%.2f"|format(o['total_amount']) }}</td>
             <td>
                 Status: {{ o['delivery_status'] }}<br>
-                Ship: {{ o['ship_date'] or '-' }} | Deliv: {{ o['delivery_date'] or '-' }}
+                Ship: {{ o['ship_date'] or '-' }} | Deliv: {{ o['delivery_date'] or '-' }}<br>
+                <span class="muted">{{ o['tracking_number'] or '' }}</span>
             </td>
             <td>
+                {% if o['status'] != 'Cancelled' %}
                 <form method="POST">
                     <input type="hidden" name="action" value="update_delivery">
                     <input type="hidden" name="order_id" value="{{ o['order_id'] }}">
@@ -769,23 +921,19 @@ def store_orders():
                     <input type="text" name="tracking_number" value="{{ o['tracking_number'] or '' }}" placeholder="Tracking #" style="width:120px;">
                     <button type="submit" class="btn">Update</button>
                 </form>
+                {% else %}<span class="muted">Cancelled</span>{% endif %}
             </td>
         </tr>
         {% endfor %}
     </table>
- 
+
     <div class="card" style="margin-top:25px;">
         <h3>Process Customer Return</h3>
         <form method="POST">
             <input type="hidden" name="action" value="process_return">
-            <div class="form-row"><label>Order ID</label>
-                <select name="order_id">
-                    {% for o in orders %}<option value="{{ o['order_id'] }}">Order #{{ o['order_id'] }} ({{ o['customer_name'] }})</option>{% endfor %}
-                </select>
-            </div>
-            <div class="form-row"><label>Part Returned</label>
-                <select name="part_id">
-                    {% for item in order_items %}<option value="{{ item['part_id'] }}">Order #{{ item['order_id'] }} - {{ item['part_number'] }} ({{ item['part_name'] }})</option>{% endfor %}
+            <div class="form-row"><label>Order Line Returned</label>
+                <select name="order_part">
+                    {% for item in order_items %}<option value="{{ item['order_id'] }}:{{ item['part_id'] }}">Order #{{ item['order_id'] }} - {{ item['part_number'] }} {{ item['part_name'] }} (qty {{ item['quantity'] }})</option>{% endfor %}
                 </select>
             </div>
             <div class="form-row"><label>Quantity Returned</label><input type="number" name="quantity" min="1" value="1" required></div>
@@ -795,11 +943,13 @@ def store_orders():
     </div>
     {% endblock %}
     """
-    return render_template_string(template, orders=orders, order_items=order_items)
+    return render_template_string(template, orders=orders, order_items=order_items, status_filter=status_filter)
+
 
 @app.route('/store/purchase-orders', methods=['GET', 'POST'])
 def store_purchase_orders():
-    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
     conn = get_db_connection()
     if request.method == 'POST':
         action = request.form.get('action')
@@ -819,34 +969,41 @@ def store_purchase_orders():
             po_id = int(request.form['po_id'])
             new_status = request.form['status']
             po = conn.execute("SELECT * FROM Purchase_Order WHERE po_id=?", (po_id,)).fetchone()
-            if po and po['status'] == 'Ordered' and new_status == 'Received':
-                items = conn.execute("SELECT * FROM Purchase_Order_Item WHERE po_id=?", (po_id,)).fetchall()
-                for it in items:
-                    conn.execute("""
-                        INSERT INTO Inventory (store_id, part_id, quantity, reorder_level)
-                        VALUES (?, ?, ?, 5)
-                        ON CONFLICT(store_id, part_id) DO UPDATE SET quantity = quantity + excluded.quantity
-                    """, (po['store_id'], it['part_id'], it['quantity']))
-            conn.execute("UPDATE Purchase_Order SET status=? WHERE po_id=?", (new_status, po_id))
-            conn.commit()
-            flash(f"Purchase Order #{po_id} marked as {new_status}.")
+            if not po or po['status'] != 'Ordered' or new_status not in ('Received', 'Stopped'):
+                flash("Only open purchase orders can be received or stopped.")
+            else:
+                if new_status == 'Received':
+                    items = conn.execute("SELECT * FROM Purchase_Order_Item WHERE po_id=?", (po_id,)).fetchall()
+                    for it in items:
+                        conn.execute("""
+                            INSERT INTO Inventory (store_id, part_id, quantity, reorder_level)
+                            VALUES (?, ?, ?, 5)
+                            ON CONFLICT(store_id, part_id) DO UPDATE SET quantity = quantity + excluded.quantity
+                        """, (po['store_id'], it['part_id'], it['quantity']))
+                conn.execute("UPDATE Purchase_Order SET status=? WHERE po_id=?", (new_status, po_id))
+                conn.commit()
+                flash(f"Purchase Order #{po_id} marked as {new_status}." + (" Inventory updated." if new_status == 'Received' else ""))
     pos = conn.execute("""
-        SELECT po.*, sup.supplier_name, s.store_name, p.part_number, p.part_name, poi.quantity, poi.unit_cost
+        SELECT po.*, sup.supplier_name, s.store_name, p.part_number, p.part_name, poi.quantity, poi.unit_cost,
+               e.first_name || ' ' || e.last_name AS placed_by
         FROM Purchase_Order po
         JOIN Supplier sup ON po.supplier_id = sup.supplier_id
         JOIN Store s ON po.store_id = s.store_id
         JOIN Purchase_Order_Item poi ON po.po_id = poi.po_id
         JOIN Part p ON poi.part_id = p.part_id
+        LEFT JOIN Employee e ON po.employee_id = e.employee_id
         ORDER BY po.po_id DESC
     """).fetchall()
     suppliers = conn.execute("SELECT * FROM Supplier").fetchall()
     stores = conn.execute("SELECT * FROM Store").fetchall()
-    parts = conn.execute("SELECT * FROM Part").fetchall()
+    parts = conn.execute("SELECT * FROM Part ORDER BY part_number").fetchall()
+    low_stock = conn.execute("SELECT * FROM v_low_stock").fetchall()
     conn.close()
     template = """
     {% extends "base" %}
     {% block content %}
     <h2>Supplier Purchase Orders (Order New / Reorder / Stop Orders)</h2>
+    <div class="grid-2">
     <div class="card">
         <h3>Create Supplier Purchase Order</h3>
         <form method="POST">
@@ -855,7 +1012,7 @@ def store_purchase_orders():
                 <select name="po_type"><option value="Reorder">Reorder</option><option value="New Part Order">New Part Order</option></select>
             </div>
             <div class="form-row"><label>Destination Store</label>
-                <select name="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %}</select>
+                <select name="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}" {% if s['store_id'] == session.get('store_id') %}selected{% endif %}>{{ s['store_name'] }}</option>{% endfor %}</select>
             </div>
             <div class="form-row"><label>Supplier</label>
                 <select name="supplier_id">{% for sup in suppliers %}<option value="{{ sup['supplier_id'] }}">{{ sup['supplier_name'] }}</option>{% endfor %}</select>
@@ -869,8 +1026,18 @@ def store_purchase_orders():
             <button type="submit" class="btn btn-success">Submit Purchase Order</button>
         </form>
     </div>
+    <div class="card">
+        <h3>Parts at or Below Reorder Level</h3>
+        <table>
+            <tr><th>Store</th><th>Part</th><th>Qty</th><th>Reorder at</th></tr>
+            {% for l in low_stock %}
+            <tr><td>{{ l['store_name'] }}</td><td>{{ l['part_number'] }} {{ l['part_name'] }}</td><td>{{ l['quantity'] }}</td><td>{{ l['reorder_level'] }}</td></tr>
+            {% endfor %}
+        </table>
+    </div>
+    </div>
     <table>
-        <tr><th>PO #</th><th>Type</th><th>Store</th><th>Supplier</th><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Expected</th><th>Status</th><th>Action</th></tr>
+        <tr><th>PO #</th><th>Type</th><th>Store</th><th>Supplier</th><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Ordered / Expected</th><th>Placed By</th><th>Status</th><th>Action</th></tr>
         {% for po in pos %}
         <tr>
             <td>#{{ po['po_id'] }}</td>
@@ -880,7 +1047,8 @@ def store_purchase_orders():
             <td>{{ po['part_number'] }} ({{ po['part_name'] }})</td>
             <td>{{ po['quantity'] }}</td>
             <td>${{ "%.2f"|format(po['unit_cost']) }}</td>
-            <td>{{ po['expected_date'] }}</td>
+            <td>{{ po['order_date'] }} / {{ po['expected_date'] }}</td>
+            <td>{{ po['placed_by'] or '-' }}</td>
             <td>{{ po['status'] }}</td>
             <td>
                 {% if po['status'] == 'Ordered' %}
@@ -899,11 +1067,13 @@ def store_purchase_orders():
     </table>
     {% endblock %}
     """
-    return render_template_string(template, pos=pos, suppliers=suppliers, stores=stores, parts=parts)
- 
+    return render_template_string(template, pos=pos, suppliers=suppliers, stores=stores, parts=parts, low_stock=low_stock)
+
+
 @app.route('/store/database', methods=['GET', 'POST'])
 def store_db_management():
-    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
     conn = get_db_connection()
     if request.method == 'POST':
         action = request.form.get('action')
@@ -920,7 +1090,7 @@ def store_db_management():
                 for s in stores:
                     cur.execute("INSERT INTO Inventory (store_id, part_id, quantity, reorder_level) VALUES (?, ?, 0, 5)", (s['store_id'], new_part_id))
                 conn.commit()
-                flash("New auto part added to catalog.")
+                flash("New auto part added to catalog (stock 0 at every store; receive a purchase order to stock it).")
             except sqlite3.IntegrityError:
                 flash("Part number already exists.")
         elif action == 'update_part':
@@ -928,23 +1098,40 @@ def store_db_management():
                          (request.form['part_name'], request.form['unit_price'], request.form['part_condition'], request.form['part_id']))
             conn.commit()
             flash("Part updated.")
+        elif action == 'update_inventory':
+            try:
+                conn.execute("UPDATE Inventory SET quantity=?, reorder_level=? WHERE store_id=? AND part_id=?",
+                             (int(request.form['quantity']), int(request.form['reorder_level']), request.form['store_id'], request.form['part_id']))
+                conn.commit()
+                flash("Inventory updated.")
+            except (ValueError, sqlite3.IntegrityError):
+                flash("Quantity and reorder level must be whole numbers of 0 or more.")
         elif action == 'add_store':
             try:
-                conn.execute("INSERT INTO Store (store_name, street, city, state, zip, phone) VALUES (?,?,?,?,?,?)",
-                             (request.form['store_name'], request.form['street'], request.form['city'],
-                              request.form['state'], request.form['zip'], request.form['phone']))
+                cur = conn.cursor()
+                cur.execute("INSERT INTO Store (store_name, street, city, state, zip, phone) VALUES (?,?,?,?,?,?)",
+                            (request.form['store_name'], request.form['street'], request.form['city'],
+                             request.form['state'], request.form['zip'], request.form['phone']))
+                new_store = cur.lastrowid
+                # A new branch gets an inventory row for every part so it shows up in the catalog right away.
+                cur.execute("INSERT INTO Inventory (store_id, part_id, quantity, reorder_level) SELECT ?, part_id, 0, 5 FROM Part", (new_store,))
                 conn.commit()
                 flash("New store location added.")
             except sqlite3.IntegrityError:
                 flash("Store name already exists.")
-    parts = conn.execute("SELECT p.*, sup.supplier_name FROM Part p LEFT JOIN Supplier sup ON p.supplier_id = sup.supplier_id").fetchall()
+    parts = conn.execute("SELECT p.*, sup.supplier_name FROM Part p LEFT JOIN Supplier sup ON p.supplier_id = sup.supplier_id ORDER BY p.part_number").fetchall()
     stores = conn.execute("SELECT * FROM Store").fetchall()
     suppliers = conn.execute("SELECT * FROM Supplier").fetchall()
+    inventory = conn.execute("""
+        SELECT i.*, s.store_name, p.part_number, p.part_name FROM Inventory i
+        JOIN Store s ON i.store_id = s.store_id JOIN Part p ON i.part_id = p.part_id
+        ORDER BY s.store_name, p.part_number
+    """).fetchall()
     conn.close()
     template = """
     {% extends "base" %}
     {% block content %}
-    <h2>Database Management — Parts & Store Branches</h2>
+    <h2>Database Management — Parts, Inventory & Store Branches</h2>
     <div class="grid-2">
         <div class="card">
             <h3>Add New Auto Part</h3>
@@ -976,14 +1163,13 @@ def store_db_management():
                 <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
                 <button type="submit" class="btn btn-success">Add Store Branch</button>
             </form>
+            <h3>Active Branches</h3>
+            <ul>
+                {% for s in stores %}<li>{{ s['store_name'] }} — {{ s['city'] }}, {{ s['state'] }} ({{ s['phone'] }})</li>{% endfor %}
+            </ul>
         </div>
     </div>
- 
-    <h3>Active Branches</h3>
-    <ul>
-        {% for s in stores %}<li>{{ s['store_name'] }} — {{ s['city'] }}, {{ s['state'] }} ({{ s['phone'] }})</li>{% endfor %}
-    </ul>
- 
+
     <h3>Update Existing Auto Parts</h3>
     <table>
         <tr><th>Part #</th><th>Name</th><th>Condition</th><th>Unit Price</th><th>Supplier</th><th>Save</th></tr>
@@ -1009,26 +1195,50 @@ def store_db_management():
         </tr>
         {% endfor %}
     </table>
+
+    <h3 style="margin-top:30px;">Inventory by Store</h3>
+    <table>
+        <tr><th>Store</th><th>Part</th><th>Quantity</th><th>Reorder Level</th><th>Save</th></tr>
+        {% for i in inventory %}
+        <tr>
+            <td>{{ i['store_name'] }}</td>
+            <td>{{ i['part_number'] }} {{ i['part_name'] }}
+                {% if i['quantity'] <= i['reorder_level'] %}<span class="badge badge-low">Low</span>{% endif %}</td>
+            <td><input type="number" name="quantity" min="0" value="{{ i['quantity'] }}" form="inv{{ i['store_id'] }}_{{ i['part_id'] }}" style="width:80px;"></td>
+            <td><input type="number" name="reorder_level" min="0" value="{{ i['reorder_level'] }}" form="inv{{ i['store_id'] }}_{{ i['part_id'] }}" style="width:80px;"></td>
+            <td>
+                <form id="inv{{ i['store_id'] }}_{{ i['part_id'] }}" method="POST">
+                    <input type="hidden" name="action" value="update_inventory">
+                    <input type="hidden" name="store_id" value="{{ i['store_id'] }}">
+                    <input type="hidden" name="part_id" value="{{ i['part_id'] }}">
+                    <button type="submit" class="btn">Save</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
     {% endblock %}
     """
-    return render_template_string(template, parts=parts, stores=stores, suppliers=suppliers)
+    return render_template_string(template, parts=parts, stores=stores, suppliers=suppliers, inventory=inventory)
+
 
 @app.route('/store/employees', methods=['GET', 'POST'])
 def store_employees():
     if session.get('mode') != 'store':
         return redirect(url_for('store_login'))
-    is_manager = (session.get('role') =='Store Manager')
+    is_manager = (session.get('role') == 'Store Manager')
     conn = get_db_connection()
     if request.method == 'POST':
         if not is_manager:
-            flash("Permisson Denied: Only Store Managers can modify employee records.")
+            conn.close()
+            flash("Permission Denied: Only Store Managers can modify employee records.")
             return redirect(url_for('store_employees'))
         action = request.form.get('action')
         if action == 'add':
-            
-            conn.execute("""
+            try:
+                conn.execute("""
                     INSERT INTO Employee (store_id, manager_id, first_name, last_name, department, role, phone, email, username, password_hash, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 """, (
                     request.form['store_id'],
                     request.form.get('manager_id') or None,
@@ -1037,24 +1247,30 @@ def store_employees():
                     request.form['department'],
                     request.form['role'],
                     request.form['phone'],
-                    request.form['email'],
+                    request.form['email'].strip() or None,
                     request.form['username'],
                     generate_password_hash(request.form['password'])))
-            conn.commit()
-            flash("Employee added successfully.")
+                conn.commit()
+                flash("Employee added successfully.")
+            except sqlite3.IntegrityError:
+                flash("That username or email is already in use.")
         elif action == 'edit':
-            conn.execute("""
-                UPDATE Employee SET department=?, role=?, store_id=?, status=?
-                WHERE employee_id=?
-            """, (
-                request.form['department'],
-                request.form['role'],
-                request.form['store_id'],
-                request.form['status'],
-                request.form['employee_id']
-            ))
-            conn.commit()
-            flash("Employee updated successfully.")
+            target_id = int(request.form['employee_id'])
+            if target_id == session.get('employee_id') and request.form['status'] != 'Active':
+                flash("You cannot deactivate your own account while logged in.")
+            else:
+                conn.execute("""
+                    UPDATE Employee SET department=?, role=?, store_id=?, status=?
+                    WHERE employee_id=?
+                """, (
+                    request.form['department'],
+                    request.form['role'],
+                    request.form['store_id'],
+                    request.form['status'],
+                    target_id
+                ))
+                conn.commit()
+                flash("Employee updated successfully.")
 
         elif action == 'delete':
             target_id = int(request.form['employee_id'])
@@ -1066,9 +1282,10 @@ def store_employees():
                     conn.commit()
                     flash("Employee removed.")
                 except sqlite3.IntegrityError:
-                    flash("Cannot delete employee due to existing references in the database.")
-    employees = conn.execute("SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id").fetchall()
+                    flash("Cannot delete employee due to existing references in the database. Set the status to Inactive instead.")
+    employees = conn.execute("SELECT e.*, s.store_name FROM Employee e JOIN Store s ON e.store_id = s.store_id ORDER BY e.employee_id").fetchall()
     stores = conn.execute("SELECT * FROM Store").fetchall()
+    managers = conn.execute("SELECT employee_id, first_name, last_name FROM Employee WHERE role = 'Store Manager' AND status = 'Active'").fetchall()
     conn.close()
     template = """
         {% extends "base" %}
@@ -1081,19 +1298,20 @@ def store_employees():
             <h3>Add a new employee</h3>
             <form method="POST">
                 <input type="hidden" name="action" value="add">
-                <div class ="grid-2">
+                <div class="grid-2">
                     <div>
                         <div class="form-row"><label>First Name</label><input type="text" name="first_name" required></div>
                         <div class="form-row"><label>Last Name</label><input type="text" name="last_name" required></div>
                         <div class="form-row"><label>Department</label><input type="text" name="department"></div>
-                        <div class="form-row"><label>Role</label><input type="text" name="role" placeholder="e.g. Store Manager, Sales Associate">></div>
+                        <div class="form-row"><label>Role</label><input type="text" name="role" placeholder="e.g. Store Manager, Sales Associate" required></div>
                         <div class="form-row"><label>Phone</label><input type="text" name="phone"></div>
                     </div>
                     <div>
                         <div class="form-row"><label>Email</label><input type="email" name="email"></div>
-                        <div class="form-row"><label>Assigned Store</label><select name ="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %} </select></div>
+                        <div class="form-row"><label>Assigned Store</label><select name="store_id">{% for s in stores %}<option value="{{ s['store_id'] }}">{{ s['store_name'] }}</option>{% endfor %}</select></div>
+                        <div class="form-row"><label>Manager</label><select name="manager_id"><option value="">None</option>{% for m in managers %}<option value="{{ m['employee_id'] }}">{{ m['first_name'] }} {{ m['last_name'] }}</option>{% endfor %}</select></div>
                         <div class="form-row"><label>Login Username</label><input type="text" name="username" required></div>
-                        <div class="form-row"><label>Password</label><input type="password" name="password" required></div>
+                        <div class="form-row"><label>Password</label><input type="password" name="password" minlength="6" required></div>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-success">Add Employee</button>
@@ -1103,31 +1321,35 @@ def store_employees():
         <table>
             <tr>
                 <th>ID</th>
-                <th>Name</th>
+                <th>Name / Username</th>
                 <th>Store</th>
-                <th>Department</th>
-                <th>Role</th>
-                <th>Status</th>
-                {% if is_manager %}<th>Actions</th>{% endif %}
+                {% if is_manager %}
+                    <th>Department / Role / Store / Status</th>
+                    <th>Delete</th>
+                {% else %}
+                    <th>Department</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                {% endif %}
             </tr>
             {% for e in employees %}
             <tr>
                 <td>#{{ e['employee_id'] }}</td>
-                <td>{{ e['first_name'] }} {{ e['last_name'] }}, {{ e['username'] }}</td>
+                <td>{{ e['first_name'] }} {{ e['last_name'] }}<br><span class="muted">{{ e['username'] }}</span></td>
                 <td>{{ e['store_name'] }}</td>
                 {% if is_manager %}
                     <td>
                         <form method="POST" style="display:inline;">
                             <input type="hidden" name="action" value="edit">
-                            <input type="hidden" name="employee_id" value="{{ e['employee_id' }}">
-                            <input type+"text" name="department" value="{{ e['department'] or ''}}"style="width:110px;">
-                            <input type="text" name="role" value="{{ e['role'] or '' }}"style="width:110px;">
+                            <input type="hidden" name="employee_id" value="{{ e['employee_id'] }}">
+                            <input type="text" name="department" value="{{ e['department'] or '' }}" style="width:110px;">
+                            <input type="text" name="role" value="{{ e['role'] or '' }}" style="width:120px;">
                             <select name="store_id">
                                 {% for s in stores %}<option value="{{ s['store_id'] }}" {% if s['store_id'] == e['store_id'] %}selected{% endif %}>{{ s['store_name'] }}</option>{% endfor %}
                             </select>
                             <select name="status">
-                                <option value = "Active" {% if e['status'] =='Active' %}selected{% endif %}>Active</option>
-                                <option value = "Inactive" {% if e['status'] =='Inactive' %}selected{% endif %}Inactive{/option>
+                                <option value="Active" {% if e['status'] == 'Active' %}selected{% endif %}>Active</option>
+                                <option value="Inactive" {% if e['status'] == 'Inactive' %}selected{% endif %}>Inactive</option>
                             </select>
                             <button type="submit" class="btn">Save</button>
                         </form>
@@ -1146,143 +1368,131 @@ def store_employees():
                 {% endif %}
             </tr>
             {% endfor %}
-        <table>
-        {%endblock%}
+        </table>
+        {% endblock %}
         """
-    return render_template_string(template, employees=employees, is_manager=is_manager, stores=stores)
+    return render_template_string(template, employees=employees, is_manager=is_manager, stores=stores, managers=managers)
+
 
 @app.route('/store/orders/log')
 def order_management():
-    if session.get('mode') != 'store': return redirect(url_for('store_login'))
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
     conn = get_db_connection()
     orders = conn.execute("""
-        SELECT o.order_id, o.order_date, o.total_amount, o.status, c.first_name || ' ' || c.last_name as customer_name, s.store_name
+        SELECT o.order_id, o.order_date, o.total_amount, o.status, c.first_name || ' ' || c.last_name AS customer_name, s.store_name
         FROM Orders o
-        JOIN Customer c on o.customer_id = c.customer_id
-        JOIN Store s on o.store_id = s.store_id
+        JOIN Customer c ON o.customer_id = c.customer_id
+        JOIN Store s ON o.store_id = s.store_id
+        ORDER BY o.order_date DESC
     """).fetchall()
     conn.close()
     template = """
     {% extends "base" %}
     {% block content %}
-    <h1> Queue & Delivery Pipeline Log
+    <h2>Order Log</h2>
     <table>
-            <tr>
-                <th>Customer ID</th>
-                <th>Branch</th>
-                <th>Node</th>
-                <th>Date Logged</th>
-                <th>Net Invoiced</th>
-                <th>Fulfillment Status</th>
-            </tr>
-            {% for o in orders %}
-            <tr>
-                <td>{{ o['customer_name'] }}</td>
-                <td>{{ o['store_name'] }}</td>
-                <td>{{ o['order_id'] }}</td>
-                <td>{{ o['order_date'] }}</td>
-                <td>${{ "%.2f"|format(o['total_amount']) }}</td>
-                <td>${{ o['status'] }}</td>
-            </tr>
-            {% endfor %}
-        </table>
+        <tr>
+            <th>Order #</th>
+            <th>Customer</th>
+            <th>Branch</th>
+            <th>Date Logged</th>
+            <th>Net Invoiced</th>
+            <th>Fulfillment Status</th>
+        </tr>
+        {% for o in orders %}
+        <tr>
+            <td>#{{ o['order_id'] }}</td>
+            <td>{{ o['customer_name'] }}</td>
+            <td>{{ o['store_name'] }}</td>
+            <td>{{ o['order_date'] }}</td>
+            <td>${{ "%.2f"|format(o['total_amount']) }}</td>
+            <td>{{ o['status'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
     {% endblock %}
     """
     return render_template_string(template, orders=orders)
+
+
 @app.route('/store/reports')
 def store_reports():
-    if session.get('mode') != 'store': return redirect(url_for('store_login'))
-conn = get_db_connection()
-low_stock = conn.execute("SELECT * FROM v_low_stock").fetchall()
-daily = conn.execute("SELECT * FROM v_daily_sales").fetchall()
-weekly = conn.execute("SELECT * FROM v_weekly_sales").fetchall()
-monthly = conn.execute("SELECT * FROM v_monthly_sales").fetchall()
-emp_status = conn.execute("SELECT * FROM v_employee_status").fetchall()
-conn.close()
-template = """
+    if session.get('mode') != 'store':
+        return redirect(url_for('store_login'))
+    conn = get_db_connection()
+    low_stock = conn.execute("SELECT * FROM v_low_stock ORDER BY store_name, part_number").fetchall()
+    daily = conn.execute("SELECT * FROM v_daily_sales ORDER BY period DESC, store_name").fetchall()
+    weekly = conn.execute("SELECT * FROM v_weekly_sales ORDER BY period DESC, store_name").fetchall()
+    monthly = conn.execute("SELECT * FROM v_monthly_sales ORDER BY period DESC, store_name").fetchall()
+    emp_status = conn.execute("SELECT * FROM v_employee_status ORDER BY employee_id").fetchall()
+    part_sales = conn.execute("SELECT * FROM v_part_sales WHERE units_sold > 0 ORDER BY net_revenue DESC").fetchall()
+    inv_value = conn.execute("SELECT store_name, COUNT(*) AS part_lines, SUM(quantity) AS units, SUM(total_value) AS total_value FROM v_inventory_value GROUP BY store_name").fetchall()
+    returns = conn.execute("SELECT * FROM v_returns ORDER BY return_date DESC").fetchall()
+    conn.close()
+    template = """
 {% extends "base" %}
 {% block content %}
-<h3>1. Low Stock Reorder Alert</h2>
+<h2>System Reports</h2>
+<p class="muted">Jump to: <a href="#low">Low Stock</a> | <a href="#daily">Daily</a> | <a href="#weekly">Weekly</a> | <a href="#monthly">Monthly</a> | <a href="#parts">Part Sales</a> | <a href="#inv">Inventory Value</a> | <a href="#returns">Returns</a> | <a href="#emp">Employees</a></p>
+<h3 id="low">1. Low Stock Reorder Alert (v_low_stock)</h3>
 <table>
-    <tr>
-        <th>Store</th>
-        <th>Part Name</th>
-        <th>Part #</th>
-        <th>Quantity</th>
-        <th>Reorder Level</th>
-    </tr>
+    <tr><th>Store</th><th>Part #</th><th>Part Name</th><th>Quantity</th><th>Reorder Level</th></tr>
     {% for item in low_stock %}
-        <tr>
-            <td>{{ item['store_name'] }}</td>
-            <td>{{ item['part_number'] }}</td>
-            <td>{{ item['part_name'] }}</td>
-            <td>{{ item['quantity'] }}</td>
-            <td>{{ item['reorder_level'] }}</td>
-        </tr>
+    <tr>
+        <td>{{ item['store_name'] }}</td>
+        <td>{{ item['part_number'] }}</td>
+        <td>{{ item['part_name'] }}</td>
+        <td>{{ item['quantity'] }}</td>
+        <td>{{ item['reorder_level'] }}</td>
+    </tr>
     {% endfor %}
 </table>
-<h3>2.Daily Sales (v_daily_sales)</h3>
+<h3 id="daily">2. Daily Sales (v_daily_sales)</h3>
 <table>
-    <tr>
-        <th>Store</th>
-        <th>Date</th>
-        <th>Orders</th>
-        <th>Revenue</th>
-    </tr>
+    <tr><th>Store</th><th>Date</th><th>Orders</th><th>Net Revenue</th></tr>
+    {% for r in daily %}
+    <tr><td>{{ r['store_name'] }}</td><td>{{ r['period'] }}</td><td>{{ r['order_count'] }}</td><td>${{ "%.2f"|format(r['revenue']) }}</td></tr>
+    {% endfor %}
+</table>
+<h3 id="weekly">3. Weekly Sales (v_weekly_sales)</h3>
+<table>
+    <tr><th>Store</th><th>Week</th><th>Orders</th><th>Net Revenue</th></tr>
+    {% for r in weekly %}
+    <tr><td>{{ r['store_name'] }}</td><td>{{ r['period'] }}</td><td>{{ r['order_count'] }}</td><td>${{ "%.2f"|format(r['revenue']) }}</td></tr>
+    {% endfor %}
+</table>
+<h3 id="monthly">4. Monthly Sales (v_monthly_sales)</h3>
+<table>
+    <tr><th>Store</th><th>Month</th><th>Orders</th><th>Net Revenue</th></tr>
     {% for r in monthly %}
-        <tr>
-            <td>{{ r['store_name'] }}</td>
-            <td>{{ r['period'] }}</td>
-            <td>{{ r['order_count'] }}</td>
-            <td>{{ "%.2f"|format(r['revenue']) }}</td>
-        </tr>
+    <tr><td>{{ r['store_name'] }}</td><td>{{ r['period'] }}</td><td>{{ r['order_count'] }}</td><td>${{ "%.2f"|format(r['revenue']) }}</td></tr>
     {% endfor %}
 </table>
-<h3>3. Weekly Sales (v_weekly_sales)</h3>
-    <table>
-        <tr>
-            <th>Store</th>
-            <th>Week</th>
-            <th>Orders</th>
-            <th>Revenue</th>
-        </tr>
-        {% for r in monthly %}
-        <tr>
-            <td>{{ r['store_name'] }}</td>
-            <td>{{ r['period'] }}</td>
-            <td>{{ r['order_count'] }}</td>
-            <td>{{ "%.2f"|format(r['revenue']) }}</td>
-        </tr>
-    {% endfor %}
- </table>
-<h3>4. Monthly Sales (v_monthly_sales)</h3>
+<h3 id="parts">5. Part Sales (v_part_sales)</h3>
 <table>
-        <tr>
-            <th>Store</th>
-            <th>Month</th>
-            <th>Orders</th>
-            <th>Revenue</th>
-        </tr>
-    {% for r in monthly %}
-    <tr>
-        <td>{{ r['store_name'] }}</td>
-        <td>{{ r['period'] }}</td>
-        <td>{{ r['order_count'] }}</td>
-        <td>{{ "%.2f"|format(r['revenue']) }}</td>
-    </tr>
+    <tr><th>Part #</th><th>Part Name</th><th>Category</th><th>Sold</th><th>Returned</th><th>Net Units</th><th>Net Revenue</th></tr>
+    {% for p in part_sales %}
+    <tr><td>{{ p['part_number'] }}</td><td>{{ p['part_name'] }}</td><td>{{ p['category'] }}</td><td>{{ p['units_sold'] }}</td><td>{{ p['units_returned'] }}</td><td>{{ p['net_units'] }}</td><td>${{ "%.2f"|format(p['net_revenue']) }}</td></tr>
     {% endfor %}
 </table>
-<h3>5. Employee Status Report (v_employee_status)</h3>
+<h3 id="inv">6. Inventory Value by Store (v_inventory_value)</h3>
 <table>
-    <tr>
-        <th>ID</th>
-        <th>Employee</th>
-        <th>Store</th>
-        <th>Department</th>
-        <th>Role</th>
-        <th>Manager</th>
-        <th>Status</th>
-    </tr>
+    <tr><th>Store</th><th>Part Lines</th><th>Units on Hand</th><th>Retail Value</th></tr>
+    {% for v in inv_value %}
+    <tr><td>{{ v['store_name'] }}</td><td>{{ v['part_lines'] }}</td><td>{{ v['units'] }}</td><td>${{ "%.2f"|format(v['total_value']) }}</td></tr>
+    {% endfor %}
+</table>
+<h3 id="returns">7. Returns (v_returns)</h3>
+<table>
+    <tr><th>Return #</th><th>Date</th><th>Store</th><th>Order #</th><th>Part</th><th>Qty</th><th>Reason</th><th>Refund</th><th>Processed By</th></tr>
+    {% for r in returns %}
+    <tr><td>#{{ r['return_id'] }}</td><td>{{ r['return_date'] }}</td><td>{{ r['store_name'] }}</td><td>#{{ r['order_id'] }}</td><td>{{ r['part_number'] }} {{ r['part_name'] }}</td><td>{{ r['quantity'] }}</td><td>{{ r['reason'] }}</td><td>${{ "%.2f"|format(r['refund_amount']) }}</td><td>{{ r['processed_by'] }}</td></tr>
+    {% endfor %}
+</table>
+<h3 id="emp">8. Employee Status Report (v_employee_status)</h3>
+<table>
+    <tr><th>ID</th><th>Employee</th><th>Store</th><th>Department</th><th>Role</th><th>Manager</th><th>Status</th></tr>
     {% for e in emp_status %}
     <tr>
         <td>#{{ e['employee_id'] }}</td>
@@ -1297,11 +1507,19 @@ template = """
 </table>
 {% endblock %}
 """
+    return render_template_string(template, low_stock=low_stock, daily=daily, weekly=weekly, monthly=monthly,
+                                  emp_status=emp_status, part_sales=part_sales, inv_value=inv_value, returns=returns)
 
-return render_template_string(template, low_stock=low_stock, daily=daily, weekly=weekly, monthly=monthly, emp_status=emp_status, store_metrics=store_metrics, base=BASE_LAYOUT)
+
 @app.route('/logout')
 def logout():
     session.clear()
+    flash("You have been logged out.")
     return redirect(url_for('browse_catalog'))
-    if __name__ == '__main__':
-        app.run(debug=os.environ.get('FLASK_DEBUG'), port=5000)
+
+
+if __name__ == '__main__':
+    if not os.path.exists(DB_PATH):
+        print("No database found, creating auto_parts.db with sample data...")
+        init_db()
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1', port=5000)
